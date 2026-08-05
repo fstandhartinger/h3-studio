@@ -1,0 +1,24 @@
+{
+  "name": "h3-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web UI for MiniMax H3 video generation on a self-hosted RunPod GPU",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.0"
+  }
+}

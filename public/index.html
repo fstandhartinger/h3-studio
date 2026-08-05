@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>H3 Studio — MiniMax H3 video + native audio</title>
+<meta name="description" content="Drive a self-hosted MiniMax H3 video model with natively generated synchronized stereo audio.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23120f1c'/><text x='50%25' y='56%25' font-size='34' font-family='monospace' font-weight='700' fill='%23a78bfa' text-anchor='middle' dominant-baseline='middle'>H3</text></svg>">
+</head>
+<body>
+
+<!-- ───────────────────────── Login gate ───────────────────────── -->
+<div id="boot" class="boot" aria-live="polite">
+  <div class="boot-inner"><span class="spinner" aria-hidden="true"></span> Connecting to H3 Studio…</div>
+</div>
+
+<div id="login" class="login" hidden>
+  <form class="login-card" id="login-form" novalidate>
+    <div class="login-mark" aria-hidden="true">H3</div>
+    <h1 class="login-title">H3 Studio</h1>
+    <p class="login-sub">Video <em>and</em> synchronized stereo audio, straight out of the model.</p>
+    <label class="field">
+      <span class="field-label" id="login-pw-label">Password</span>
+      <input id="login-password" type="password" name="password" autocomplete="current-password"
+             aria-labelledby="login-pw-label" required autofocus>
+    </label>
+    <p class="login-error" id="login-error" role="alert" hidden></p>
+    <button class="btn btn-primary btn-block" type="submit" id="login-submit">Unlock</button>
+  </form>
+</div>
+
+<!-- ───────────────────────── App ───────────────────────── -->
+<div id="app" class="app" hidden>
+
+  <header class="topbar">
+    <div class="topbar-brand">
+      <span class="brand-mark" aria-hidden="true">H3</span>
+      <span class="brand-text">
+        <strong>H3 Studio</strong>
+        <small>MiniMax H3 · video + native audio</small>
+      </span>
+    </div>
+
+    <div class="statusbar" id="statusbar" aria-label="Pod status">
+      <!-- online dot -->
+      <div class="stat stat-online" id="stat-online" title="Pod reachability">
+        <span class="dot" id="status-dot" data-state="unknown" aria-hidden="true"></span>
+        <span class="stat-value" id="status-text">checking…</span>
+      </div>
+
+      <!-- gpu + vram -->
+      <div class="stat stat-gpu" id="stat-gpu" title="GPU and VRAM">
+        <span class="stat-key" id="gpu-name">GPU</span>
+        <span class="vram">
+          <span class="vram-track"><span class="vram-fill" id="vram-fill" style="width:0%"></span></span>
+          <span class="stat-value num" id="vram-text">– / –</span>
+        </span>
+      </div>
+
+      <!-- queue -->
+      <div class="stat" title="ComfyUI queue">
+        <span class="stat-key">Queue</span>
+        <span class="stat-value num" id="queue-text">–</span>
+      </div>
+
+      <!-- deadline countdown -->
+      <div class="stat stat-deadline" id="stat-deadline" hidden title="The pod is killed on a timer to cap cost">
+        <span class="stat-key">Auto‑kill</span>
+        <span class="stat-value num" id="deadline-text">–</span>
+      </div>
+
+      <p class="visually-hidden" id="status-live" aria-live="polite"></p>
+    </div>
+
+    <div class="topbar-actions">
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch colour theme" title="Switch colour theme">
+        <span class="theme-icon" aria-hidden="true"></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- offline banner -->
+  <div class="banner banner-offline" id="offline-banner" role="alert" hidden>
+    <strong>The pod is offline.</strong>
+    <span id="offline-detail">Generation is unavailable until a RunPod instance is up and ComfyUI answers. Existing results below still play.</span>
+  </div>
+
+  <main class="layout">
+
+    <!-- ═════════ LEFT: controls ═════════ -->
+    <section class="panel controls" aria-label="Generation controls">
+
+      <!-- Mode tabs -->
+      <div class="tabs" role="tablist" aria-label="Generation mode">
+        <button role="tab" class="tab" id="tab-t2v"   data-mode="t2v"   aria-selected="true"  aria-controls="pane-t2v">Text&nbsp;→&nbsp;Video</button>
+        <button role="tab" class="tab" id="tab-i2v"   data-mode="i2v"   aria-selected="false" aria-controls="pane-i2v" tabindex="-1">Image&nbsp;→&nbsp;Video</button>
+        <button role="tab" class="tab" id="tab-flf2v" data-mode="flf2v" aria-selected="false" aria-controls="pane-flf2v" tabindex="-1">First&nbsp;+&nbsp;Last</button>
+        <button role="tab" class="tab" id="tab-r2v"   data-mode="r2v"   aria-selected="false" aria-controls="pane-r2v" tabindex="-1">Reference&nbsp;→&nbsp;Video</button>
+      </div>
+
+      <!-- Mode panes -->
+      <div class="panes">
+        <div role="tabpanel" id="pane-t2v" aria-labelledby="tab-t2v" class="pane">
+          <p class="hint">Nothing to upload — the whole clip, picture and soundtrack, is invented from the prompt.</p>
+        </div>
+
+        <div role="tabpanel" id="pane-i2v" aria-labelledby="tab-i2v" class="pane" hidden>
+          <p class="hint">The uploaded image becomes the <strong>first frame</strong>; the model animates forward from it.</p>
+          <div class="dropzones one">
+            <div class="dz" data-slot="firstFrame" data-accept="image" data-max="1" role="group"
+                 aria-label="First frame image">
+              <button type="button" class="dz-body">
+                <span class="dz-icon" aria-hidden="true">⬒</span>
+                <span class="dz-title">First frame</span>
+                <span class="dz-sub">click · drop · paste</span>
+              </button>
+              <div class="dz-items"></div>
+            </div>
+          </div>
+        </div>
+
+        <div role="tabpanel" id="pane-flf2v" aria-labelledby="tab-flf2v" class="pane" hidden>
+          <p class="hint">Give both ends and the model interpolates the shot between them. Either box may be left empty —
+            supply only the <em>last</em> frame and it invents the run‑up that lands on it.</p>
+          <div class="dropzones two">
+            <div class="dz" data-slot="firstFrame" data-accept="image" data-max="1" role="group"
+                 aria-label="First frame image, optional">
+              <button type="button" class="dz-body">
+                <span class="dz-icon" aria-hidden="true">⬒</span>
+                <span class="dz-title">First frame</span>
+                <span class="dz-sub">optional</span>
+              </button>
+              <div class="dz-items"></div>
+            </div>
+            <div class="dz" data-slot="lastFrame" data-accept="image" data-max="1" role="group"
+                 aria-label="Last frame image, optional">
+              <button type="button" class="dz-body">
+                <span class="dz-icon" aria-hidden="true">⬓</span>
+                <span class="dz-title">Last frame</span>
+                <span class="dz-sub">optional</span>
+              </button>
+              <div class="dz-items"></div>
+            </div>
+          </div>
+        </div>
+
+        <div role="tabpanel" id="pane-r2v" aria-labelledby="tab-r2v" class="pane" hidden>
+          <p class="hint">Drop reference material — subjects, styles, motion, voices — and the model carries it into a new clip.
+            Limits: <strong>9 images</strong>, <strong>3 videos</strong>, <strong>3 audio clips</strong>, and
+            <strong>12 files total</strong>.</p>
+          <div class="dropzones one">
+            <div class="dz dz-multi" data-slot="refs" data-accept="image,video,audio" data-max="12" role="group"
+                 aria-label="Reference files — up to 12 images, videos and audio clips">
+              <button type="button" class="dz-body">
+                <span class="dz-icon" aria-hidden="true">✥</span>
+                <span class="dz-title">Reference files</span>
+                <span class="dz-sub">click · drop · paste</span>
+              </button>
+              <div class="dz-items"></div>
+            </div>
+          </div>
+          <p class="note num" id="ref-counts" aria-live="polite">0/9 images · 0/3 videos · 0/3 audio · 0/12 total</p>
+          <label class="field field-inline">
+            <span class="field-label">Reference image size</span>
+            <!-- The node only accepts these two. "max" pushes references through at a
+                 2048px short edge for identity fidelity; reference tokens ride through
+                 every sampling step, so it can be several times slower. -->
+            <select id="ref-image-size">
+              <option value="match" selected>match — scale refs to the output area (faster)</option>
+              <option value="max">max — 2048px short edge, best identity (much slower)</option>
+            </select>
+          </label>
+          <p class="note note-warn" id="r2v-note" hidden>
+            This mode needs the <code>Ref2VA</code> checkpoint, which is not loaded on the pod right now.
+          </p>
+        </div>
+      </div>
+
+      <!-- Prompt -->
+      <div class="block">
+        <div class="block-head">
+          <label class="block-title" for="prompt">Prompt</label>
+          <span class="counter num" id="prompt-count">0 characters</span>
+        </div>
+        <textarea id="prompt" class="prompt" rows="9" spellcheck="true"
+                  placeholder="Describe the look, then a timeline with spoken lines, then the audio design. Press ⌘/Ctrl + Enter to generate."></textarea>
+
+        <div class="prompt-tools">
+          <button class="btn btn-ghost btn-sm" type="button" id="insert-template">Insert template</button>
+          <button class="btn btn-ghost btn-sm" type="button" id="toggle-structure"
+                  aria-expanded="false" aria-controls="structure-panel">Prompt structure ▾</button>
+          <button class="btn btn-ghost btn-sm" type="button" id="clear-prompt">Clear</button>
+        </div>
+
+        <div class="disclosure" id="structure-panel" hidden>
+          <p>MiniMax H3 responds to an explicitly staged prompt far better than to a single sentence. Four sections, in this order:</p>
+          <ol class="structure-list">
+            <li><strong>Look</strong> — one paragraph of subject, lens, lighting and setting. No timing here.</li>
+            <li><strong>Timeline</strong> — bracketed windows <code>[0s‑2s]</code>. Put every camera move and action in a window.
+              Dialogue goes inside a window as <em>…and says clearly in English: "the line"</em>. The quoted text is what gets spoken.</li>
+            <li><strong>Camera grammar</strong> — one continuous shot, or hard cuts. Saying "no zooms" actually suppresses zooms.</li>
+            <li><strong>Audio</strong> — the headline feature. Name the ambience <em>and where it sits in the stereo field</em>,
+              the voice and its exact time window, and every music or sfx entrance by timestamp. This is not a TTS track bolted on
+              afterwards — the model decodes picture and stereo sound from the same latent, so anything you don't specify it will
+              invent for you.</li>
+          </ol>
+          <p class="note">Finish with negative constraints such as <em>no on‑screen text, no subtitles</em>. Eleven languages are
+            supported for dialogue, but naming the language in the line ("says clearly in English") is what makes it reliable.</p>
+        </div>
+
+        <div class="examples">
+          <span class="examples-label">Examples</span>
+          <div class="example-chips" id="example-chips"></div>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div class="block">
+        <div class="block-head"><h2 class="block-title">Output</h2></div>
+
+        <label class="field">
+          <span class="field-label">Resolution</span>
+          <select id="preset">
+            <option value="1344x768" selected>16:9 — 1344 × 768 (native)</option>
+            <option value="768x1344">9:16 — 768 × 1344</option>
+            <option value="1024x1024">1:1 — 1024 × 1024</option>
+            <option value="864x480">16:9 small — 864 × 480 (fast)</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </label>
+
+        <details class="adv" id="adv-res">
+          <summary>Advanced dimensions</summary>
+          <div class="adv-body">
+            <label class="field">
+              <span class="field-label">Width</span>
+              <input id="width" type="number" min="256" max="2048" step="32" value="1344" inputmode="numeric">
+            </label>
+            <label class="field">
+              <span class="field-label">Height</span>
+              <input id="height" type="number" min="256" max="2048" step="32" value="768" inputmode="numeric">
+            </label>
+            <p class="note">Both must be multiples of 32. Anything much above the 768 short side is untested on this checkpoint —
+              the 2K pass is API‑only and not part of the local model.</p>
+          </div>
+        </details>
+
+        <div class="field">
+          <div class="field-row">
+            <span class="field-label" id="dur-label"><label for="duration">Duration</label></span>
+            <output class="field-out num" id="duration-out" for="duration">5.17 s · 124 frames</output>
+          </div>
+          <input id="duration" type="range" min="1" max="15" step="0.05" value="5.17"
+                 aria-labelledby="dur-label" aria-describedby="dur-help">
+          <p class="note" id="dur-help">The video VAE only accepts frame counts where <code>length&nbsp;%&nbsp;17&nbsp;==&nbsp;5</code>,
+            so the slider snaps to the nearest legal clip. The server re‑snaps and reports the value it actually used.</p>
+          <p class="note note-warn" id="dur-warn" hidden>Above 243 frames (10.1 s) is beyond the lengths validated on this pod —
+            expect long runs and higher VRAM.</p>
+        </div>
+
+        <div class="field">
+          <div class="field-row">
+            <span class="field-label"><label for="steps">Sampling steps</label></span>
+            <output class="field-out num" id="steps-out" for="steps">20</output>
+          </div>
+          <input id="steps" type="range" min="4" max="40" step="1" value="20" aria-describedby="steps-help">
+          <p class="note" id="steps-help">20 is the calibrated default. The checkpoint is CFG‑distilled, so there is no guidance
+            scale — steps are the only quality dial, and time scales almost linearly with them.</p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="seed">Seed</label>
+          <div class="seed-row">
+            <input id="seed" type="number" min="0" max="4294967295" step="1" placeholder="random" inputmode="numeric">
+            <button class="icon-btn" type="button" id="seed-random" aria-label="Randomise seed" title="Randomise seed">⚄</button>
+            <button class="btn btn-ghost btn-sm" type="button" id="seed-reuse" disabled
+                    title="Reuse the seed from the last generation">Reuse last</button>
+          </div>
+          <p class="note">Leave empty for a fresh random seed each run. The server returns the seed it used, so any clip can be reproduced.</p>
+        </div>
+      </div>
+
+      <!-- Estimate + generate -->
+      <div class="block block-tight">
+        <div class="estimate" id="estimate" aria-live="polite">
+          <div class="estimate-main">
+            <span class="estimate-key">Estimated render</span>
+            <span class="estimate-val num" id="est-time">≈ 6 min</span>
+          </div>
+          <div class="estimate-sub">
+            <span class="num" id="est-cost">≈ $0.21</span> of GPU time at $2.09/h ·
+            <span id="est-detail">124 frames × 20 steps</span>
+          </div>
+          <p class="note">Extrapolated from three measured runs on this exact card. Treat it as a ballpark — queue waits,
+            a cold model load (~90 s) and VAE decode all move it.</p>
+        </div>
+
+        <button class="btn btn-primary btn-block btn-generate" type="button" id="generate">
+          <span id="generate-label">Generate video + audio</span>
+        </button>
+        <p class="blocked-reason" id="generate-reason" role="status" hidden></p>
+      </div>
+    </section>
+
+    <!-- ═════════ RIGHT: result + gallery ═════════ -->
+    <section class="panel results" aria-label="Result and history">
+
+      <!-- Progress -->
+      <div class="progress-card" id="progress-card" hidden aria-live="polite">
+        <div class="progress-head">
+          <span class="progress-stage" id="progress-stage">Queued</span>
+          <button class="btn btn-danger btn-sm" type="button" id="cancel">Cancel</button>
+        </div>
+        <div class="progress-track" role="progressbar" id="progress-bar-wrap"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+        </div>
+        <div class="progress-meta">
+          <span class="num" id="progress-steps"></span>
+          <span class="num" id="progress-eta"></span>
+        </div>
+      </div>
+
+      <!-- Result -->
+      <div class="result" id="result" hidden>
+        <div class="video-wrap">
+          <video id="video" controls playsinline preload="metadata" loop></video>
+          <button class="unmute" id="unmute" type="button">
+            <span class="unmute-icon" aria-hidden="true">🔊</span>
+            <span class="unmute-text"><strong>Turn the sound on.</strong>
+              This clip's stereo track was generated by the model itself, in the same pass as the picture.</span>
+          </button>
+        </div>
+        <div class="result-meta" id="result-meta"></div>
+        <p class="result-prompt" id="result-prompt"></p>
+        <div class="result-actions">
+          <a class="btn btn-primary btn-sm" id="download" download>Download mp4</a>
+          <button class="btn btn-ghost btn-sm" type="button" id="copy-settings">Copy settings to form</button>
+          <button class="btn btn-ghost btn-sm" type="button" id="regen">Regenerate, new seed</button>
+        </div>
+      </div>
+
+      <!-- Empty / error states -->
+      <div class="placeholder" id="placeholder">
+        <span class="placeholder-icon" aria-hidden="true">◐</span>
+        <h2>Nothing rendered yet</h2>
+        <p>Write a prompt with a timeline and an audio paragraph, then hit generate. A 5‑second 768p clip takes about
+          six minutes on this card and comes back as one mp4 with 32&nbsp;kHz stereo already muxed in.</p>
+      </div>
+
+      <div class="errorbox" id="errorbox" role="alert" hidden>
+        <div class="errorbox-head">Generation failed</div>
+        <pre class="errorbox-msg" id="errorbox-msg"></pre>
+        <button class="btn btn-ghost btn-sm" type="button" id="errorbox-dismiss">Dismiss</button>
+      </div>
+
+      <!-- Gallery -->
+      <div class="gallery-block">
+        <div class="block-head">
+          <h2 class="block-title">History</h2>
+          <button class="btn btn-ghost btn-sm" type="button" id="refresh-gallery">Refresh</button>
+        </div>
+        <div class="gallery" id="gallery"></div>
+        <p class="gallery-empty" id="gallery-empty">Finished clips land here.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Self‑hosted MiniMax H3 · ComfyUI · RTX PRO 6000 Blackwell</span>
+    <span class="footer-sep" aria-hidden="true">·</span>
+    <span>Picture and stereo audio decoded from one latent — no TTS in the pipeline.</span>
+  </footer>
+</div>
+
+<!-- hidden file input reused by every drop zone -->
+<input type="file" id="file-input" hidden multiple>
+
+<div class="toasts" id="toasts" aria-live="assertive" aria-atomic="false"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
