@@ -240,7 +240,8 @@ const state = {
   job: null,            // { id, params, stage }
   current: null,        // job object currently shown in the result panel
   lastSeed: null,
-  jobs: []
+  jobs: [],
+  loras: []            // [{name, on, strength}] mirrored from the pod
 };
 
 /* ───────────────────────── element refs ───────────────────────── */
@@ -271,6 +272,12 @@ const el = {
   refCounts: $('#ref-counts'),
   r2vNote: $('#r2v-note'),
   refImageSize: $('#ref-image-size'),
+
+  loraBlock: $('#lora-block'),
+  loraList: $('#lora-list'),
+  loraEmpty: $('#lora-empty'),
+  loraHint: $('#lora-hint'),
+  loraRefresh: $('#lora-refresh'),
 
   prompt: $('#prompt'),
   promptCount: $('#prompt-count'),
@@ -385,6 +392,8 @@ function enterApp() {
   setInterval(pollStatus, 10_000);
   setInterval(tickDeadline, 1000);
   loadGallery();
+  renderLoras();      // paint whatever was restored from storage immediately
+  loadLoras();        // then reconcile against the pod
 }
 
 /* ───────────────────────── status polling ───────────────────────── */
@@ -956,6 +965,7 @@ function saveSettings() {
       steps: el.steps.value,
       seed: el.seed.value,
       refImageSize: el.refImageSize.value,
+      loras: state.loras.map(l => ({ name: l.name, on: l.on, strength: l.strength })),
       lastSeed: state.lastSeed
     }));
   } catch { /* private mode / quota — settings are a nicety, not a requirement */ }
@@ -972,10 +982,18 @@ function restoreSettings() {
   if (s.steps) el.steps.value = s.steps;
   if (s.seed) el.seed.value = s.seed;
   if (s.refImageSize) el.refImageSize.value = s.refImageSize;
+  // seed the picker from storage so the ticks survive a reload; loadLoras()
+  // then reconciles against what is actually on the pod
+  if (Array.isArray(s.loras)) {
+    state.loras = s.loras
+      .filter(l => l && typeof l.name === 'string')
+      .map(l => ({ name: l.name, on: !!l.on, strength: Number(l.strength) || 1 }));
+  }
   if (s.lastSeed != null) state.lastSeed = s.lastSeed;
   setMode(['t2v', 'i2v', 'flf2v', 'r2v'].includes(s.mode) ? s.mode : 't2v');
 }
 el.refImageSize.addEventListener('change', saveSettings);
+el.loraRefresh.addEventListener('click', () => { loadLoras(); });
 
 /* ───────────────────────── generate availability ───────────────────────── */
 
@@ -1047,6 +1065,8 @@ async function generate() {
     if (auds.length) payload.refAudios = auds;
     payload.refImageSize = el.refImageSize.value;
   }
+  const chosenLoras = activeLoras();
+  if (chosenLoras.length) payload.loras = chosenLoras;
 
   hideError();
   state.submitting = true;               // closes the window between click and jobId
@@ -1627,3 +1647,80 @@ window.addEventListener('beforeunload', ev => {
 /* ───────────────────────── go ───────────────────────── */
 
 boot();
+
+
+/* ── LoRAs ──────────────────────────────────────────────────────────────
+   The pod's models/loras directory is the source of truth; we just mirror it.
+   Enabled state and strength are remembered per filename across reloads, so a
+   rescan does not wipe the user's selection. */
+
+async function loadLoras() {
+  let names = [];
+  try {
+    const r = await api('/api/loras');
+    names = (r.loras || []).map(l => l.name).filter(Boolean);
+  } catch {
+    names = [];                       // pod offline: leave the panel empty, not broken
+  }
+  const prev = new Map(state.loras.map(l => [l.name, l]));
+  state.loras = names.map(name => {
+    const p = prev.get(name);
+    return { name, on: p ? p.on : false, strength: p ? p.strength : 1 };
+  });
+  renderLoras();
+}
+
+function renderLoras() {
+  const list = el.loraList;
+  list.textContent = '';
+  const any = state.loras.length > 0;
+  el.loraEmpty.hidden = any;
+  el.loraHint.hidden = !any;
+
+  for (const l of state.loras) {
+    const row = document.createElement('div');
+    row.className = 'lora-row';
+    row.dataset.on = String(l.on);
+
+    const id = 'lora-' + l.name.replace(/[^\w]/g, '_');
+
+    const check = document.createElement('label');
+    check.className = 'lora-check';
+    check.htmlFor = id;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.id = id; cb.checked = l.on;
+    const nm = document.createElement('span');
+    nm.className = 'lora-name';
+    nm.textContent = l.name.replace(/\.safetensors$/, '');
+    check.append(cb, nm);
+
+    const str = document.createElement('div');
+    str.className = 'lora-strength';
+    const rng = document.createElement('input');
+    rng.type = 'range'; rng.min = '0'; rng.max = '2'; rng.step = '0.05';
+    rng.value = String(l.strength);
+    rng.setAttribute('aria-label', `Strength for ${l.name}`);
+    const val = document.createElement('span');
+    val.className = 'num';
+    val.textContent = l.strength.toFixed(2);
+    str.append(rng, val);
+
+    cb.addEventListener('change', () => {
+      l.on = cb.checked;
+      row.dataset.on = String(l.on);
+      saveSettings(); syncEstimate();
+    });
+    rng.addEventListener('input', () => {
+      l.strength = Number(rng.value);
+      val.textContent = l.strength.toFixed(2);
+    });
+    rng.addEventListener('change', saveSettings);
+
+    row.append(check, str);
+    list.append(row);
+  }
+}
+
+function activeLoras() {
+  return state.loras.filter(l => l.on).map(l => ({ name: l.name, strength: l.strength }));
+}

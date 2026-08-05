@@ -168,12 +168,22 @@ function buildGraph(job) {
     cond = add('MiniMaxH3ImageToVideo', inputs);
   }
 
+  // LoRAs patch the DiT only. Chain them, and feed the result to BOTH MODEL
+  // consumers — patching the guider but not the scheduler would compute the
+  // sigma schedule from different weights than the denoiser uses.
+  let modelSrc = [unet, 0];
+  for (const l of (job.loras || [])) {
+    modelSrc = [add('LoraLoaderModelOnly', {
+      model: modelSrc, lora_name: l.name, strength_model: l.strength,
+    }), 0];
+  }
+
   const noise = add('RandomNoise', { noise_seed: seed });
-  const guider = add('BasicGuider', { model: [unet, 0], conditioning: [cond, 0] });
+  const guider = add('BasicGuider', { model: modelSrc, conditioning: [cond, 0] });
   // The released checkpoints are CFG-distilled -> BasicGuider, not CFGGuider.
   const sampler = add('KSamplerSelect', { sampler_name: 'res_multistep' });
   const sigmas = add('BasicScheduler', {
-    model: [unet, 0], scheduler: 'simple', steps, denoise: 1.0,
+    model: modelSrc, scheduler: 'simple', steps, denoise: 1.0,
   });
   const sampled = add('SamplerCustomAdvanced', {
     noise: [noise, 0], guider: [guider, 0], sampler: [sampler, 0],
@@ -232,6 +242,7 @@ function publicJob(j) {
     jobId: j.id, state: j.state, mode: j.mode, prompt: j.prompt,
     width: j.width, height: j.height, frames: j.length,
     durationSec: +(j.length / FPS).toFixed(2), steps: j.steps, seed: j.seed,
+    loras: j.loras || [],
     createdAt: j.createdAt, elapsedSec: j.elapsedSec ?? null,
     step: j.step ?? 0, totalSteps: j.steps,
     error: j.error || undefined,
@@ -485,6 +496,16 @@ app.get('/api/status', requireAuth, async (req, res) => {
   }
 });
 
+app.get('/api/loras', requireAuth, async (req, res) => {
+  try {
+    const oi = await comfyJson('/object_info/LoraLoaderModelOnly', {}, 20000);
+    const names = oi?.LoraLoaderModelOnly?.input?.required?.lora_name?.[0] || [];
+    res.json({ loras: (Array.isArray(names) ? names : []).map((n) => ({ name: n })) });
+  } catch (e) {
+    res.json({ loras: [], error: e.message });
+  }
+});
+
 app.post('/api/upload', requireAuth, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'no file' });
   const mime = req.file.mimetype || '';
@@ -542,6 +563,14 @@ app.post('/api/generate', requireAuth, async (req, res) => {
     lastFrame: b.lastFrame || null,
     refImages: b.refImages || [], refVideos: b.refVideos || [], refAudios: b.refAudios || [],
     refImageSize: b.refImageSize === 'max' ? 'max' : 'match',
+    // [{name, strength}] — the UI sends only the ones actually ticked
+    loras: (Array.isArray(b.loras) ? b.loras : [])
+      .filter((l) => l && typeof l.name === 'string' && l.name)
+      .slice(0, 6)
+      .map((l) => ({
+        name: l.name,
+        strength: Math.max(-4, Math.min(4, Number(l.strength ?? 1) || 0)),
+      })),
     createdAt: Date.now(), step: 0,
   };
 

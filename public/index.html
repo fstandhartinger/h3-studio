@@ -282,6 +282,24 @@
         </div>
       </div>
 
+      <!-- LoRAs -->
+      <div class="block" id="lora-block">
+        <div class="block-head">
+          <h2 class="block-title">LoRAs</h2>
+          <button class="btn btn-ghost btn-sm" type="button" id="lora-refresh"
+                  title="Rescan the pod's models/loras directory">Rescan</button>
+        </div>
+        <div id="lora-list" class="lora-list" role="group" aria-label="Available LoRAs"></div>
+        <p class="note" id="lora-empty" hidden>
+          No LoRAs found. Drop <code>.safetensors</code> files into
+          <code>ComfyUI/models/loras/</code> on the pod, then hit Rescan.
+        </p>
+        <p class="note" id="lora-hint" hidden>
+          Applied to the diffusion model only, in the order listed. Strength 1.0 is how the LoRA
+          was trained; below ~0.3 the effect can vanish into the checkpoint's int8 quantisation.
+        </p>
+      </div>
+
       <!-- Estimate + generate -->
       <div class="block block-tight">
         <div class="estimate" id="estimate" aria-live="polite">
