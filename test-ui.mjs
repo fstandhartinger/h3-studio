@@ -17,23 +17,26 @@ fs.mkdirSync(SHOTS, { recursive: true });
 // page.screenshot() waits for fonts + stability, which hangs under the
 // headless shell in WSL. CDP captureScreenshot has no such wait.
 async function shot(p, name, full = false) {
-  try {
+  // Both page.screenshot() and a bare CDP capture can hang under the headless
+  // shell in WSL; a screenshot is never worth stalling the run for.
+  const cap = (async () => {
     const cdp = await p.context().newCDPSession(p);
-    const { data } = await cdp.send('Page.captureScreenshot', {
-      format: 'png',
-      captureBeyondViewport: full,
-    });
-    fs.writeFileSync(SHOTS + name, Buffer.from(data, 'base64'));
-    await cdp.detach().catch(() => {});
-  } catch (e) {
-    console.log(`  screenshot ${name} failed: ${e.message.split('\n')[0]}`);
-  }
+    try {
+      const { data } = await cdp.send('Page.captureScreenshot', {
+        format: 'png', captureBeyondViewport: full,
+      });
+      fs.writeFileSync(SHOTS + name, Buffer.from(data, 'base64'));
+    } finally { await cdp.detach().catch(() => {}); }
+  })();
+  const timed = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 12000));
+  await Promise.race([cap, timed]).catch((e) =>
+    console.log(`  screenshot ${name} skipped (${e.message})`));
 }
 
 const problems = [];
 const note = (m) => console.log('  ' + m);
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ channel: 'chrome' });
 // The app honours prefers-reduced-motion; use it so perpetual animations
 // (status dot pulse, progress shimmer) don't defeat stability checks.
 const ctx = await browser.newContext({
@@ -51,7 +54,7 @@ page.on('requestfailed', (r) => {
 });
 
 console.log(`\n== loading ${BASE}`);
-await page.goto(BASE, { waitUntil: 'networkidle', timeout: 60000 });
+await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
 if (PASSWORD) {
   const pw = page.locator('input[type=password]').first();
@@ -145,7 +148,9 @@ else {
       await page.waitForTimeout(2000);
       const t = await page.locator('body').innerText();
       if (/\b\d+\s*\/\s*\d+\b|%/.test(t) && /generat|sampl|progress|step/i.test(t)) sawProgress = true;
-      if (await page.locator('video').count()) { done = true; break; }
+      const ready = await page.evaluate(() =>
+        [...document.querySelectorAll('video')].some((v) => (v.currentSrc || v.src || '').includes('/api/video/')));
+      if (ready) { done = true; break; }
       if (/error|failed/i.test(t) && !/no error/i.test(t)) {
         const snippet = t.split('\n').filter((l) => /error|failed/i.test(l)).slice(0, 3).join(' | ');
         problems.push(`UI reported an error: ${snippet}`);
@@ -160,8 +165,11 @@ else {
       // chrome-headless-shell ships without an H.264 decoder, so videoWidth is
       // always 0 here. Check that the src resolves and the server serves a real
       // mp4 instead of trying to decode it.
-      const src = await page.locator('video').first().getAttribute('src')
-        || await page.locator('video source').first().getAttribute('src');
+      const src = await page.evaluate(() => {
+        const v = [...document.querySelectorAll('video')]
+          .find((x) => (x.currentSrc || x.src || '').includes('/api/video/'));
+        return v ? (v.currentSrc || v.src) : '';
+      });
       if (!src) problems.push('video element has no src');
       else {
         const r = await page.request.get(new URL(src, BASE).href);
@@ -183,7 +191,7 @@ else {
 // --- mobile -----------------------------------------------------------------
 const mob = await ctx.newPage();
 await mob.setViewportSize({ width: 390, height: 844 });
-await mob.goto(BASE, { waitUntil: 'networkidle' });
+await mob.goto(BASE, { waitUntil: 'domcontentloaded' });
 await mob.waitForTimeout(2000);
 const overflow = await mob.evaluate(() =>
   document.documentElement.scrollWidth - document.documentElement.clientWidth);
