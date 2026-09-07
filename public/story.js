@@ -59,20 +59,32 @@ function init() {
   const state = { plan: null, storyId: null, es: null };
 
   /* ── view switching ───────────────────────────────────────────── */
+  // Owns all three workspaces rather than one per module, so two modules can never both
+  // think they are visible.
+  const VIEWS = {
+    clip:  { view: el.viewClip,  tab: el.tabClip },
+    story: { view: el.viewStory, tab: el.tabStory },
+    board: { view: document.querySelector('#view-board'), tab: document.querySelector('#vtab-board') },
+  };
+
   function showView(which) {
-    const story = which === 'story';
-    el.viewStory.hidden = !story;
-    el.viewClip.hidden = story;
-    el.tabStory.setAttribute('aria-selected', String(story));
-    el.tabClip.setAttribute('aria-selected', String(!story));
-    el.tabStory.tabIndex = story ? 0 : -1;
-    el.tabClip.tabIndex = story ? -1 : 0;
+    if (!VIEWS[which]?.view) which = 'clip';
+    for (const [name, v] of Object.entries(VIEWS)) {
+      if (!v.view || !v.tab) continue;
+      const on = name === which;
+      v.view.hidden = !on;
+      v.tab.setAttribute('aria-selected', String(on));
+      v.tab.tabIndex = on ? 0 : -1;
+    }
     try { localStorage.setItem('h3-view', which); } catch { /* private mode */ }
   }
-  el.tabClip.addEventListener('click', () => showView('clip'));
-  el.tabStory.addEventListener('click', () => showView('story'));
+
+  for (const [name, v] of Object.entries(VIEWS)) {
+    v.tab?.addEventListener('click', () => showView(name));
+  }
   try {
-    if (localStorage.getItem('h3-view') === 'story') showView('story');
+    const saved = localStorage.getItem('h3-view');
+    if (saved && saved !== 'clip') showView(saved);
   } catch { /* private mode */ }
 
   /* ── planning ─────────────────────────────────────────────────── */

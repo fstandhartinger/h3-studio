@@ -101,10 +101,40 @@
     <span id="offline-detail">Generation is unavailable until a RunPod instance is up and ComfyUI answers. Existing results below still play.</span>
   </div>
 
-  <nav class="viewswitch" role="tablist" aria-label="Workspace">
-    <button role="tab" class="vtab" id="vtab-clip"  aria-selected="true"  aria-controls="view-clip">Single clip</button>
-    <button role="tab" class="vtab" id="vtab-story" aria-selected="false" aria-controls="view-story" tabindex="-1">Story</button>
-  </nav>
+  <div class="workbar">
+    <nav class="viewswitch" role="tablist" aria-label="Workspace">
+      <button role="tab" class="vtab" id="vtab-clip"  aria-selected="true"  aria-controls="view-clip">Single clip</button>
+      <button role="tab" class="vtab" id="vtab-story" aria-selected="false" aria-controls="view-story" tabindex="-1">Story</button>
+      <button role="tab" class="vtab" id="vtab-board" aria-selected="false" aria-controls="view-board" tabindex="-1">Storyboard</button>
+    </nav>
+
+    <!-- GPU pod control. Always visible, because it is the thing that costs money. -->
+    <div class="podbar" id="podbar" aria-label="GPU pod">
+      <div class="pod-idle" id="pod-idle">
+        <span class="pod-label">No GPU running</span>
+        <label class="pod-hours">
+          <span>max hours</span>
+          <input id="pod-hours" type="number" min="0.25" max="10" step="0.25" value="1"
+                 inputmode="decimal" required>
+        </label>
+        <button class="btn btn-primary btn-sm" type="button" id="pod-start">Start pod</button>
+      </div>
+
+      <div class="pod-live" id="pod-live" hidden>
+        <span class="pod-dot" id="pod-dot" data-state="provisioning" aria-hidden="true"></span>
+        <span class="pod-phase" id="pod-phase">starting…</span>
+        <span class="pod-metric" title="Time until the pod is terminated">
+          ⏳ <span class="num" id="pod-timer">–</span>
+        </span>
+        <span class="pod-metric" title="Billed so far, from the moment the pod was rented">
+          💸 <span class="num" id="pod-cost">–</span>
+        </span>
+        <button class="btn btn-ghost btn-sm" type="button" id="pod-extend">+1 h</button>
+        <button class="btn btn-ghost btn-sm pod-danger" type="button" id="pod-stop">Stop</button>
+      </div>
+    </div>
+  </div>
+  <p class="pod-note" id="pod-msg" role="status" hidden></p>
 
   <main class="layout" id="view-clip">
 
@@ -498,6 +528,115 @@
 
   </main>
 
+  <!-- ───────────────────────── Storyboard ───────────────────────── -->
+  <main class="layout" id="view-board" hidden>
+
+    <section class="panel controls" aria-label="Storyboard controls">
+      <h2 class="panel-title">Storyboard</h2>
+      <p class="note">
+        Every keyframe is drawn as a still by <strong>Chroma1&#8209;HD</strong> and shown for
+        approval first. Each shot is then rendered as an interpolation between two approved
+        keyframes, so <em>both</em> ends are pinned and the video model only invents the
+        motion between them. Re-roll or replace any frame before spending a GPU minute on video.
+      </p>
+      <p class="note note-warn" id="board-nochroma" hidden>
+        Chroma1&#8209;HD is not installed on the current pod. Start a pod from the bar above —
+        new pods install it automatically.
+      </p>
+
+      <label class="field">
+        <span class="field-label"><label for="board-premise">Premise</label></span>
+        <textarea id="board-premise" class="prompt" rows="4" spellcheck="true"
+          placeholder="One or two sentences. Who, where, and what goes wrong."></textarea>
+      </label>
+
+      <div class="row">
+        <label class="field">
+          <span class="field-label"><label for="board-keyframes">Keyframes</label></span>
+          <input id="board-keyframes" type="number" min="2" max="16" value="5" inputmode="numeric">
+        </label>
+        <label class="field">
+          <span class="field-label"><label for="board-seclen">Seconds per shot</label></span>
+          <input id="board-seclen" type="number" min="2" max="15" step="0.5" value="5" inputmode="decimal">
+        </label>
+      </div>
+      <p class="note num" id="board-maths">5 keyframes → 4 shots → 20 s</p>
+
+      <label class="field">
+        <span class="field-label"><label for="board-style">Visual style</label></span>
+        <input id="board-style" type="text" value="cinematic 35mm, natural light, muted contemporary grade">
+      </label>
+      <label class="field">
+        <span class="field-label"><label for="board-language">Spoken language</label></span>
+        <input id="board-language" type="text" value="English">
+      </label>
+
+      <details class="adv">
+        <summary>Render settings</summary>
+        <div class="row">
+          <label class="field">
+            <span class="field-label"><label for="board-width">Width</label></span>
+            <input id="board-width" type="number" min="256" max="2048" step="32" value="1344">
+          </label>
+          <label class="field">
+            <span class="field-label"><label for="board-height">Height</label></span>
+            <input id="board-height" type="number" min="256" max="2048" step="32" value="768">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field">
+            <span class="field-label"><label for="board-img-steps">Image steps</label></span>
+            <input id="board-img-steps" type="number" min="4" max="60" value="26">
+          </label>
+          <label class="field">
+            <span class="field-label"><label for="board-cfg">Image CFG</label></span>
+            <input id="board-cfg" type="number" min="1" max="12" step="0.1" value="4">
+          </label>
+          <label class="field">
+            <span class="field-label"><label for="board-steps">Video steps</label></span>
+            <input id="board-steps" type="number" min="1" max="60" value="6">
+          </label>
+        </div>
+        <p class="note">Chroma takes a real negative prompt and a CFG scale, unlike the
+          CFG-distilled video checkpoint. 26 steps at CFG 4 is a good default.</p>
+      </details>
+
+      <div class="row">
+        <button class="btn btn-primary" type="button" id="board-plan-btn">Write the storyboard</button>
+        <button class="btn" type="button" id="board-frames-btn" disabled>Draw all keyframes</button>
+        <button class="btn" type="button" id="board-render-btn" disabled>Render shots</button>
+      </div>
+      <p class="note" id="board-status" aria-live="polite"></p>
+    </section>
+
+    <section class="panel results" aria-label="Storyboard">
+      <div id="board-final" hidden>
+        <h3 class="panel-title">Finished film</h3>
+        <video id="board-video" class="result-video" controls playsinline></video>
+        <p class="note num" id="board-final-note"></p>
+        <a class="btn btn-ghost btn-sm" id="board-download" download>Download</a>
+      </div>
+
+      <div id="board-plan" hidden>
+        <h3 class="panel-title" id="board-title"></h3>
+        <p class="note" id="board-logline"></p>
+        <details class="adv"><summary>Synopsis &amp; characters</summary>
+          <p class="note" id="board-synopsis"></p>
+          <div id="board-characters"></div>
+        </details>
+
+        <h4 class="sub-title">Keyframes</h4>
+        <div class="kf-grid" id="board-kf-grid"></div>
+
+        <h4 class="sub-title">Shots</h4>
+        <div id="board-shot-list"></div>
+      </div>
+
+      <p class="note" id="board-empty">No storyboard yet. Write one on the left.</p>
+    </section>
+
+  </main>
+
   <footer class="footer">
     <span>Self‑hosted MiniMax H3 · ComfyUI · RTX PRO 6000 Blackwell</span>
     <span class="footer-sep" aria-hidden="true">·</span>
@@ -512,5 +651,7 @@
 
 <script type="module" src="app.js"></script>
 <script type="module" src="story.js"></script>
+<script type="module" src="pod.js"></script>
+<script type="module" src="storyboard.js"></script>
 </body>
 </html>

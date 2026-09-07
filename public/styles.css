@@ -804,3 +804,74 @@ input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.16); }
 #story-status[data-kind="error"] { color: #f08a8a; }
 #story-status[data-kind="warn"]  { color: #f0c674; }
 #story-status[data-kind="ok"]    { color: #7ee2a8; }
+
+/* ── Work bar: workspace tabs on the left, the GPU pod on the right ──── */
+.workbar {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap;
+  max-width: 1600px; margin: 0 auto; width: 100%;
+  padding: .75rem 1.25rem 0;
+}
+.workbar .viewswitch { padding: 0; margin: 0; width: auto; }
+
+.podbar { display: flex; align-items: center; padding-bottom: .35rem; }
+.pod-idle, .pod-live { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.pod-label { font-size: .82rem; color: var(--muted, #9b96b0); }
+.pod-hours { display: flex; align-items: center; gap: .35rem; font-size: .78rem;
+             color: var(--muted, #9b96b0); }
+.pod-hours input { width: 4.5rem; }
+
+.pod-dot { width: .6rem; height: .6rem; border-radius: 50%; background: #f0c674; flex: none; }
+.pod-dot[data-state="running"] { background: #7ee2a8; }
+.pod-dot[data-state="error"]   { background: #f08a8a; }
+/* Provisioning takes ~12 minutes, so the pulse is what says "still working, not stuck". */
+.pod-dot[data-state="provisioning"] { animation: pod-pulse 1.6s ease-in-out infinite; }
+@keyframes pod-pulse { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
+
+.pod-phase { font-size: .82rem; font-weight: 600; }
+.pod-metric { font-size: .82rem; color: var(--muted, #9b96b0); }
+.pod-metric[data-level="warn"]   { color: #f0c674; }
+.pod-metric[data-level="danger"] { color: #f08a8a; font-weight: 700; }
+.pod-danger:hover { color: #f08a8a; }
+
+.pod-note {
+  max-width: 1600px; margin: .4rem auto 0; width: 100%;
+  padding: 0 1.25rem; font-size: .82rem; color: var(--muted, #9b96b0);
+}
+.pod-note[data-kind="error"] { color: #f08a8a; }
+.pod-note[data-kind="ok"]    { color: #7ee2a8; }
+
+@media (max-width: 760px) {
+  .workbar { flex-direction: column; align-items: stretch; }
+  .podbar { justify-content: flex-start; }
+}
+
+/* ── Storyboard keyframes ────────────────────────────────────────────── */
+.sub-title { margin: 1.2rem 0 .5rem; font-size: .95rem; }
+.kf-grid {
+  display: grid; gap: .9rem;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+.kf-card {
+  border: 1px solid var(--line, #2a2440); border-radius: 12px;
+  padding: .7rem; display: flex; flex-direction: column; gap: .45rem;
+  background: var(--panel, rgba(255,255,255,.02));
+}
+.kf-head { display: flex; align-items: center; gap: .5rem; }
+.kf-title { font-weight: 600; font-size: .88rem; }
+.kf-head .story-seg-state { margin-left: auto; }
+.kf-img { width: 100%; border-radius: 8px; display: block; aspect-ratio: 16/9; object-fit: cover; }
+.kf-placeholder {
+  aspect-ratio: 16/9; border-radius: 8px; display: grid; place-items: center;
+  padding: .8rem; text-align: center; font-size: .78rem; line-height: 1.35;
+  color: var(--muted, #9b96b0); background: rgba(255,255,255,.03);
+  border: 1px dashed var(--line, #2a2440);
+}
+.kf-prompt { font-size: .78rem; }
+.kf-neg, .kf-note { width: 100%; font-size: .76rem; }
+.kf-actions { display: flex; gap: .3rem; flex-wrap: wrap; }
+.kf-actions .btn { padding: .28rem .55rem; font-size: .74rem; }
+
+#board-status[data-kind="error"] { color: #f08a8a; }
+#board-status[data-kind="warn"]  { color: #f0c674; }
+#board-status[data-kind="ok"]    { color: #7ee2a8; }

@@ -21,6 +21,8 @@ import WebSocket from 'ws';
 import { planStory } from './lib/story.js';
 import { concatVideos, extractChainFrame, ffmpegAvailable } from './lib/video.js';
 import { llmConfigured } from './lib/llm.js';
+import { planStoryboard, reviseKeyframePrompt } from './lib/storyboard.js';
+import * as pod from './lib/pod.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +57,9 @@ const CKPT = {
 /** Filled in by refreshCheckpoints() from /object_info/UNETLoader. */
 let DIT = { fl2va: null, ref2va: null, available: [] };
 
+/** Chroma1-HD, the image model used for storyboard keyframes. Discovered, like the DiT. */
+let IMG = { unet: null, clip: null, vae: null, available: false };
+
 /**
  * Classify the DiT checkpoints the pod actually has.
  *
@@ -77,11 +82,34 @@ export function classifyCheckpoints(names) {
   };
 }
 
+/**
+ * Chroma1-HD needs three files that are not part of the H3 stack: the DiT itself, a
+ * T5-XXL text encoder, and the FLUX autoencoder. All three must be present or image
+ * generation is simply reported as unavailable — a half-installed image model that
+ * fails at sampling time wastes a pod minute per attempt.
+ */
+export function classifyImageModels(unets, clips, vaes) {
+  const find = (list, re) => (Array.isArray(list) ? list : []).find((n) => re.test(n)) || null;
+  const unet = find(unets, /chroma/i);
+  const clip = find(clips, /t5xxl/i);
+  const vae = find(vaes, /^ae\.safetensors$|flux/i);
+  return { unet, clip, vae, available: !!(unet && clip && vae) };
+}
+
 async function refreshCheckpoints() {
   try {
-    const oi = await comfyJson('/object_info/UNETLoader', {}, 20000);
-    const names = oi?.UNETLoader?.input?.required?.unet_name?.[0] || [];
+    const [u, c, v] = await Promise.all([
+      comfyJson('/object_info/UNETLoader', {}, 20000),
+      comfyJson('/object_info/CLIPLoader', {}, 20000).catch(() => null),
+      comfyJson('/object_info/VAELoader', {}, 20000).catch(() => null),
+    ]);
+    const names = u?.UNETLoader?.input?.required?.unet_name?.[0] || [];
     DIT = classifyCheckpoints(names);
+    IMG = classifyImageModels(
+      names,
+      c?.CLIPLoader?.input?.required?.clip_name?.[0] || [],
+      v?.VAELoader?.input?.required?.vae_name?.[0] || [],
+    );
   } catch { /* pod offline; /api/status reports that separately */ }
   return DIT;
 }
@@ -242,6 +270,41 @@ function buildGraph(job) {
   const poster = add('SaveImage', { images: [one, 0], filename_prefix: `h3poster/${job.id}` });
 
   return { graph: g, saveNode: save, posterNode: poster };
+}
+
+/**
+ * Chroma1-HD text-to-image graph, for storyboard keyframes.
+ *
+ * Unlike the H3 checkpoints, Chroma is NOT CFG-distilled: it takes a real negative
+ * prompt and a CFG scale, so this uses an ordinary KSampler rather than the
+ * BasicGuider/SamplerCustomAdvanced chain the video graph needs. The latent is
+ * EmptySD3LatentImage because Chroma inherits FLUX's 16-channel latent space.
+ */
+function buildChromaGraph(job) {
+  const { prompt, negative, width, height, steps, cfg, seed } = job;
+  if (!IMG.available) throw new Error('Chroma1-HD is not installed on this pod');
+  const g = {};
+  const add = (class_type, inputs) => {
+    const id = nid();
+    g[id] = { class_type, inputs };
+    return id;
+  };
+
+  const unet = add('UNETLoader', { unet_name: IMG.unet, weight_dtype: 'default' });
+  const clip = add('CLIPLoader', { clip_name: IMG.clip, type: 'chroma', device: 'default' });
+  const vae = add('VAELoader', { vae_name: IMG.vae });
+
+  const pos = add('CLIPTextEncode', { clip: [clip, 0], text: prompt });
+  const neg = add('CLIPTextEncode', { clip: [clip, 0], text: negative || '' });
+  const latent = add('EmptySD3LatentImage', { width, height, batch_size: 1 });
+
+  const sampled = add('KSampler', {
+    model: [unet, 0], positive: [pos, 0], negative: [neg, 0], latent_image: [latent, 0],
+    seed, steps, cfg, sampler_name: 'euler', scheduler: 'beta', denoise: 1.0,
+  });
+  const img = add('VAEDecode', { samples: [sampled, 0], vae: [vae, 0] });
+  const save = add('SaveImage', { images: [img, 0], filename_prefix: `h3keyframe/${job.id}` });
+  return { graph: g, saveNode: save };
 }
 
 // ------------------------------------------------------------ job store
@@ -505,6 +568,7 @@ app.get('/api/status', requireAuth, async (req, res) => {
     queue: { running: 0, pending: 0 },
     models: { fl2va: false, ref2va: false, dit: null, available: [] },
     story: { llm: llmConfigured(), ffmpeg: ffmpegReady },
+    image: { ...IMG },
     deadline: { iso: deadlineIso, secondsLeft },
     fps: FPS, usdPerHour: GPU_USD_PER_HOUR,
   };
@@ -537,6 +601,7 @@ app.get('/api/status', requireAuth, async (req, res) => {
         finetune: /eros/i.test(DIT.fl2va || '') ? '10Eros-Max' : 'stock MiniMax H3',
       },
       story: { llm: llmConfigured(), ffmpeg: ffmpegReady },
+      image: { ...IMG },
       wsConnected: wsAlive,
     });
   } catch (e) {
@@ -825,7 +890,8 @@ function emitStory(id, payload) {
 function publicStory(st) {
   if (!st) return null;
   return {
-    storyId: st.id, state: st.state, stage: st.stage, title: st.plan?.title,
+    storyId: st.id, kind: st.kind || 'story',
+    state: st.state, stage: st.stage, title: st.plan?.title,
     logline: st.plan?.logline, synopsis: st.plan?.synopsis,
     characters: st.plan?.characters || [],
     segmentCount: st.plan?.prompts?.length || 0,
@@ -868,10 +934,19 @@ async function renderStory(st) {
       seg.state = 'running';
       emitStory(st.id, { type: 'segment', index: seg.index, state: 'running', stage: st.stage });
 
-      // Last segment may be pinned to a supplied closing image.
-      const isLast = i === st.plan.prompts.length - 1;
-      const lastFrame = isLast ? (st.endFrame || null) : null;
-      const mode = chainFrameName ? (lastFrame ? 'flf2v' : 'i2v') : (lastFrame ? 'flf2v' : 't2v');
+      // Storyboard mode pins BOTH ends of every shot to approved keyframes, so nothing
+      // is chained and nothing is invented at either boundary. Story mode pins only the
+      // opening frame, carried over from the previous shot.
+      let firstFrame, lastFrame;
+      if (st.kind === 'storyboard') {
+        firstFrame = st.keyframeNames[i];
+        lastFrame = st.keyframeNames[i + 1] || null;
+      } else {
+        const isLast = i === st.plan.prompts.length - 1;
+        firstFrame = chainFrameName;
+        lastFrame = isLast ? (st.endFrame || null) : null;
+      }
+      const mode = firstFrame ? (lastFrame ? 'flf2v' : 'i2v') : (lastFrame ? 'flf2v' : 't2v');
 
       const job = await submitJob({
         prompt: p.prompt,
@@ -880,7 +955,7 @@ async function renderStory(st) {
         length: st.plan.frames,
         steps: st.steps,
         seed: st.seed === null ? null : st.seed + i,
-        firstFrame: chainFrameName,
+        firstFrame,
         lastFrame,
         loras: st.loras,
         storyId: st.id,
@@ -896,8 +971,9 @@ async function renderStory(st) {
         videoUrl: `/api/video/${job.id}`,
       });
 
-      // Hand the next segment the frame this one ended on.
-      if (i < st.plan.prompts.length - 1) {
+      // Hand the next segment the frame this one ended on. Storyboard mode already knows
+      // what every shot starts on, so it skips this entirely.
+      if (st.kind !== 'storyboard' && i < st.plan.prompts.length - 1) {
         const framePath = path.join(CACHE_DIR, `${st.id}-chain-${i}.jpg`);
         await extractChainFrame(done.cachedVideo, framePath, { offsetSec: st.chainOffsetSec });
         chainFrameName = await uploadToComfy(framePath, `chain_${st.id}_${i}.jpg`);
@@ -927,10 +1003,10 @@ async function renderStory(st) {
 }
 
 /** Push a local file into ComfyUI's input/ directory and return the name it got. */
-async function uploadToComfy(filePath, name) {
+async function uploadToComfy(filePath, name, type = 'image/jpeg') {
   const buf = await fsp.readFile(filePath);
   const fd = new FormData();
-  fd.append('image', new Blob([buf], { type: 'image/jpeg' }), name);
+  fd.append('image', new Blob([buf], { type }), name);
   fd.append('overwrite', 'true');
   const r = await comfyFetch('/upload/image', { method: 'POST', body: fd }, 180000);
   if (!r.ok) throw new Error(`chain-frame upload failed (${r.status})`);
@@ -1054,6 +1130,247 @@ app.get('/api/story/:id/video', requireAuth, (req, res) => {
   sendFileRange(req, res, st.finalVideo, 'video/mp4');
 });
 
+// -------------------------------------------------------------- pod control
+
+/**
+ * The reaper on Sandy asks this before falling back to the pod's own H3_DEADLINE env and
+ * then to its blanket one-hour cap. Deliberately readable with a shared token rather than
+ * the UI session cookie, because the caller is a cron job, not a browser.
+ */
+app.get('/api/pod/deadlines', (req, res) => {
+  const want = process.env.REAPER_TOKEN || '';
+  const got = req.get('X-Reaper-Token') || req.query.token || '';
+  if (!want || got !== want) return res.status(401).json({ error: 'bad token' });
+  res.json({ deadlines: pod.deadlines(), now: Math.round(Date.now() / 1000) });
+});
+
+app.get('/api/pod/status', requireAuth, async (req, res) => {
+  try { await pod.refresh(); } catch { /* status still reports what we know */ }
+  res.json(pod.status());
+});
+
+app.post('/api/pod/start', requireAuth, async (req, res) => {
+  const hours = Number(req.body?.hours);
+  if (!Number.isFinite(hours) || hours <= 0) {
+    return res.status(400).json({ error: 'hours is required' });
+  }
+  if (hours > pod.MAX_HOURS) {
+    return res.status(400).json({ error: `the cap is ${pod.MAX_HOURS} hours` });
+  }
+  try {
+    res.json(await pod.start({ hours, chroma: req.body?.chroma !== false }));
+  } catch (e) {
+    res.status(409).json({ error: e.message });
+  }
+});
+
+app.post('/api/pod/stop', requireAuth, async (req, res) => {
+  try {
+    res.json(await pod.stop('stopped from the web app'));
+  } catch (e) {
+    res.status(409).json({ error: e.message });
+  }
+});
+
+app.post('/api/pod/extend', requireAuth, (req, res) => {
+  try {
+    res.json(pod.extend(Number(req.body?.hours)));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/pod/events', requireAuth, (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders?.();
+  res.write(`data: ${JSON.stringify({ type: 'snapshot', ...pod.status() })}\n\n`);
+  const off = pod.subscribe(res);
+  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+  req.on('close', () => { clearInterval(ping); off(); });
+});
+
+// ------------------------------------------------------------ image + storyboard
+
+const images = new Map();   // imageId -> { file, prompt, seed, ... }
+const imageOrder = [];
+
+/** Generate one Chroma keyframe and cache the PNG locally. Resolves when it is done. */
+async function generateImage(spec) {
+  if (!IMG.available) await refreshCheckpoints();
+  const id = crypto.randomUUID().slice(0, 8);
+  const job = {
+    id,
+    prompt: String(spec.prompt || '').trim(),
+    negative: String(spec.negative || ''),
+    width: clampMultiple(spec.width, 1344),
+    height: clampMultiple(spec.height, 768),
+    steps: Math.min(60, Math.max(4, Math.round(Number(spec.steps) || 26))),
+    cfg: Math.min(12, Math.max(1, Number(spec.cfg) || 4.0)),
+    seed: Number.isFinite(Number(spec.seed)) && spec.seed !== null && spec.seed !== ''
+      ? Math.abs(Math.round(Number(spec.seed)))
+      : crypto.randomInt(1, 2 ** 31),
+  };
+  if (!job.prompt) throw new Error('prompt is empty');
+
+  const { graph, saveNode } = buildChromaGraph(job);
+  const r = await comfyFetch('/prompt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: graph, client_id: CLIENT_ID }),
+  }, 60000);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const detail = body?.error?.message || body?.error || `HTTP ${r.status}`;
+    throw new Error(`ComfyUI rejected the image graph: ${detail}`);
+  }
+  const promptId = body.prompt_id;
+
+  // Images are quick (~20 s) and there is no per-step feedback worth streaming, so this
+  // polls history rather than joining the websocket fan-out the video jobs use.
+  const deadline = Date.now() + 15 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r2) => setTimeout(r2, 2000));
+    let hist;
+    try { hist = await comfyJson(`/history/${promptId}`, {}, 20000); } catch { continue; }
+    const entry = hist?.[promptId];
+    if (!entry) continue;
+    const st = entry.status || {};
+    if (st.status_str === 'error') {
+      const m = (st.messages || []).find((x) => x[0] === 'execution_error');
+      throw new Error(m ? JSON.stringify(m[1]).slice(0, 300) : 'image generation failed');
+    }
+    if (!st.completed) continue;
+    const out = (entry.outputs || {})[saveNode] || {};
+    const ref = (out.images || [])[0];
+    if (!ref) throw new Error('no image in ComfyUI output');
+    const file = await cacheFile(ref, `${id}.png`);
+    const rec = { id, file, ...job, createdAt: Date.now() };
+    images.set(id, rec);
+    imageOrder.unshift(id);
+    while (imageOrder.length > 200) {
+      const gone = imageOrder.pop();
+      const old = images.get(gone);
+      if (old?.file) fsp.unlink(old.file).catch(() => {});
+      images.delete(gone);
+    }
+    await pruneCache();
+    return rec;
+  }
+  throw new Error('image generation timed out');
+}
+
+app.post('/api/image/generate', requireAuth, async (req, res) => {
+  try {
+    const rec = await generateImage(req.body || {});
+    res.json({ imageId: rec.id, url: `/api/image/${rec.id}`, seed: rec.seed,
+               width: rec.width, height: rec.height });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+app.get('/api/image/:id', requireAuth, (req, res) => {
+  const rec = images.get(req.params.id);
+  if (!rec?.file) return res.sendStatus(404);
+  sendFileRange(req, res, rec.file, 'image/png');
+});
+
+/**
+ * Push a generated image into ComfyUI's input/ directory.
+ *
+ * Necessary because LoadImage resolves by filename against input/ and cannot read from
+ * output/, where SaveImage put it. So a keyframe has to make a round trip through this
+ * app to become usable as a first_frame.
+ */
+app.post('/api/image/:id/as-input', requireAuth, async (req, res) => {
+  const rec = images.get(req.params.id);
+  if (!rec?.file) return res.status(404).json({ error: 'unknown image' });
+  try {
+    const name = await uploadToComfy(rec.file, `kf_${rec.id}.png`, 'image/png');
+    rec.comfyName = name;
+    res.json({ name });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+app.post('/api/storyboard/plan', requireAuth, async (req, res) => {
+  if (!llmConfigured()) return res.status(503).json({ error: 'ABLITERATION_API_KEY is not configured' });
+  try {
+    res.json({ board: await planStoryboard(req.body || {}) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/storyboard/revise-prompt', requireAuth, async (req, res) => {
+  try {
+    res.json({ prompt: await reviseKeyframePrompt(req.body || {}) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/**
+ * Render a storyboard: every shot is a first+last frame interpolation between two
+ * approved keyframes, so both ends are pinned and the model only invents the motion.
+ */
+app.post('/api/storyboard/render', requireAuth, async (req, res) => {
+  const b = req.body || {};
+  const board = b.board;
+  const frames = b.keyframeNames;   // [comfyui input filename per keyframe, in order]
+  if (!board?.shots?.length) return res.status(400).json({ error: 'no storyboard supplied' });
+  if (!Array.isArray(frames) || frames.length !== board.keyframes.length) {
+    return res.status(400).json({ error: 'every keyframe must be generated before rendering' });
+  }
+  if (frames.some((f) => !f)) return res.status(400).json({ error: 'a keyframe is still missing' });
+  if (!ffmpegReady) return res.status(503).json({ error: 'ffmpeg is not available in this container' });
+  try { await comfyJson('/system_stats', {}, 12000); }
+  catch (e) { return res.status(409).json({ error: `the GPU pod is offline (${e.message})` }); }
+
+  const plan = {
+    ...board,
+    prompts: board.shots.map((sh, i) => ({
+      index: i + 1,
+      title: sh.title,
+      prompt: (Array.isArray(b.prompts) && typeof b.prompts[i] === 'string' && b.prompts[i].trim())
+        ? b.prompts[i].trim() : sh.prompt,
+    })),
+    frames: snapFrames(board.secondsPerSegment ?? 5),
+    secondsPerSegment: board.secondsPerSegment ?? 5,
+  };
+
+  const st = {
+    id: crypto.randomUUID().slice(0, 8),
+    plan,
+    kind: 'storyboard',
+    keyframeNames: frames,
+    state: 'queued', stage: 'queued',
+    width: clampMultiple(b.width, 1344),
+    height: clampMultiple(b.height, 768),
+    steps: Math.min(60, Math.max(1, Math.round(Number(b.steps) || 6))),
+    seed: b.seed === '' || b.seed === null || b.seed === undefined
+      ? null : Math.abs(Math.round(Number(b.seed))) || null,
+    chainOffsetSec: 0.12,
+    loras: Array.isArray(b.loras) ? b.loras : [],
+    segments: plan.prompts.map((p) => ({
+      index: p.index, title: p.title, prompt: p.prompt, state: 'pending', jobId: null,
+    })),
+    createdAt: Date.now(),
+    abort: new AbortController(),
+  };
+
+  stories.set(st.id, st);
+  storyOrder.unshift(st.id);
+  renderStory(st).catch((e) => { st.state = 'error'; st.error = e.message; });
+  res.json({ storyId: st.id, segmentCount: st.segments.length });
+});
+
 app.get('/healthz', (req, res) => res.json({ ok: true, comfyConfigured: !!COMFY_URL }));
 
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '5m' }));
@@ -1065,6 +1382,8 @@ function clampMultiple(v, dflt) {
   return Math.min(2048, Math.max(256, snapped));
 }
 
+pod.init().catch((e) => console.warn('  pod control init failed:', e.message));
+
 ffmpegAvailable().then((ok) => {
   ffmpegReady = ok;
   if (!ok) console.warn('  ffmpeg  : MISSING — story mode is disabled');
@@ -1075,4 +1394,5 @@ app.listen(PORT, () => {
   console.log(`  ComfyUI : ${COMFY_URL || '(not configured)'}`);
   console.log(`  auth    : ${authRequired ? 'password' : 'OPEN — set APP_PASSWORD'}`);
   console.log(`  deadline: ${POD_DEADLINE || '(none)'}`);
+  console.log(`  pod ctrl: ${pod.podControlConfigured() ? 'enabled' : 'disabled (needs RUNPOD_API_KEY + POD_SSH_*)'}`);
 });
