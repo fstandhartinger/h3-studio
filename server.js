@@ -18,6 +18,9 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
+import { planStory } from './lib/story.js';
+import { concatVideos, extractChainFrame, ffmpegAvailable } from './lib/video.js';
+import { llmConfigured } from './lib/llm.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -37,14 +40,51 @@ const GPU_USD_PER_HOUR = Number(process.env.GPU_USD_PER_HOUR || 2.09);
 
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-/** ComfyUI checkpoint filenames (from Comfy-Org/MiniMax-H3). */
+/**
+ * Encoder and VAEs are always the stock ones — a finetune replaces the DiT only.
+ * The DiT filename is discovered from the pod rather than hardcoded, because the same
+ * app has to drive both the stock Comfy-Org checkpoint and the TenStrip/10Eros-Max
+ * finetune, and their filenames have nothing in common.
+ */
 const CKPT = {
-  fl2va: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors',
-  ref2va: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors',
   clip: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
   videoVae: 'minimax_h3_video_vae_fp16.safetensors',
   audioVae: 'minimax_h3_audio_vae_fp32.safetensors',
 };
+
+/** Filled in by refreshCheckpoints() from /object_info/UNETLoader. */
+let DIT = { fl2va: null, ref2va: null, available: [] };
+
+/**
+ * Classify the DiT checkpoints the pod actually has.
+ *
+ * "hybrid" files (10Eros-Max beta5) fold first/last-frame and reference conditioning
+ * into one set of weights, so one file serves both modes. Everything else is matched on
+ * the fl2va / ref2va marker in its name.
+ */
+export function classifyCheckpoints(names) {
+  const list = (Array.isArray(names) ? names : []).filter((n) => typeof n === 'string');
+  const h3 = list.filter((n) => /h3/i.test(n));
+  const pool = h3.length ? h3 : list;
+  const find = (re) => pool.find((n) => re.test(n)) || null;
+
+  const hybrid = find(/hybrid/i);
+  return {
+    available: pool,
+    // Prefer an explicit fl2va/ref2va file; fall back to a hybrid, which does both.
+    fl2va: find(/fl2va/i) || hybrid || pool[0] || null,
+    ref2va: find(/ref2va/i) || hybrid || null,
+  };
+}
+
+async function refreshCheckpoints() {
+  try {
+    const oi = await comfyJson('/object_info/UNETLoader', {}, 20000);
+    const names = oi?.UNETLoader?.input?.required?.unet_name?.[0] || [];
+    DIT = classifyCheckpoints(names);
+  } catch { /* pod offline; /api/status reports that separately */ }
+  return DIT;
+}
 
 // ------------------------------------------------------- frame-grid maths
 
@@ -118,10 +158,9 @@ function buildGraph(job) {
     return id;
   };
 
-  const unet = add('UNETLoader', {
-    unet_name: isRef ? CKPT.ref2va : CKPT.fl2va,
-    weight_dtype: 'default',
-  });
+  const unetName = (isRef ? DIT.ref2va : DIT.fl2va) || DIT.available[0];
+  if (!unetName) throw new Error('no MiniMax H3 checkpoint is loaded on the pod');
+  const unet = add('UNETLoader', { unet_name: unetName, weight_dtype: 'default' });
   const clip = add('CLIPLoader', { clip_name: CKPT.clip, type: 'minimax', device: 'default' });
   const vVae = add('VAELoader', { vae_name: CKPT.videoVae });
   const aVae = add('VAELoader', { vae_name: CKPT.audioVae });
@@ -437,10 +476,12 @@ app.post('/api/login', (req, res) => {
   const b = Buffer.from(APP_PASSWORD);
   const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
   if (!ok) return res.status(401).json({ error: 'wrong password' });
+  // Ten years. The brief is "type it once and never again"; a 30-day cookie means
+  // hunting for the password every month, which in practice means writing it down.
   res.cookie('h3s', sessionToken(), {
     httpOnly: true, signed: true, sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
-    maxAge: 30 * 24 * 3600 * 1000,
+    maxAge: 10 * 365 * 24 * 3600 * 1000,
   });
   res.json({ ok: true });
 });
@@ -462,7 +503,8 @@ app.get('/api/status', requireAuth, async (req, res) => {
   const base = {
     online: false, comfy: null, gpu: null,
     queue: { running: 0, pending: 0 },
-    models: { fl2va: false, ref2va: false },
+    models: { fl2va: false, ref2va: false, dit: null, available: [] },
+    story: { llm: llmConfigured(), ffmpeg: ffmpegReady },
     deadline: { iso: deadlineIso, secondsLeft },
     fps: FPS, usdPerHour: GPU_USD_PER_HOUR,
   };
@@ -475,6 +517,7 @@ app.get('/api/status', requireAuth, async (req, res) => {
     ]);
     const dev = (stats.devices || [])[0] || {};
     const names = unets?.UNETLoader?.input?.required?.unet_name?.[0] || [];
+    DIT = classifyCheckpoints(names);
     res.json({
       ...base,
       online: true,
@@ -488,7 +531,12 @@ app.get('/api/status', requireAuth, async (req, res) => {
         running: (queue.queue_running || []).length,
         pending: (queue.queue_pending || []).length,
       },
-      models: { fl2va: names.includes(CKPT.fl2va), ref2va: names.includes(CKPT.ref2va) },
+      models: {
+        fl2va: !!DIT.fl2va, ref2va: !!DIT.ref2va,
+        dit: DIT.fl2va, available: DIT.available,
+        finetune: /eros/i.test(DIT.fl2va || '') ? '10Eros-Max' : 'stock MiniMax H3',
+      },
+      story: { llm: llmConfigured(), ffmpeg: ffmpegReady },
       wsConnected: wsAlive,
     });
   } catch (e) {
@@ -535,26 +583,29 @@ app.get('/api/asset/:name', requireAuth, async (req, res) => {
   } catch { res.sendStatus(502); }
 });
 
-app.post('/api/generate', requireAuth, async (req, res) => {
-  const b = req.body || {};
+/**
+ * Build, queue and register one generation job.
+ *
+ * Split out of the /api/generate route so story mode can drive the identical path —
+ * a story segment must be exactly the same kind of job as a hand-made clip, or the two
+ * drift apart the first time either is changed.
+ *
+ * Returns the job; throws with a readable message when ComfyUI rejects the graph.
+ */
+async function submitJob(b) {
   const prompt = String(b.prompt || '').trim();
-  if (!prompt) return res.status(400).json({ error: 'prompt is empty' });
+  if (!prompt) throw new Error('prompt is empty');
 
   const mode = ['t2v', 'i2v', 'flf2v', 'r2v'].includes(b.mode) ? b.mode : 't2v';
   const width = clampMultiple(b.width, 1344);
   const height = clampMultiple(b.height, 768);
-  const length = snapFrames(b.durationSec ?? 5);
+  const length = b.length ? Number(b.length) : snapFrames(b.durationSec ?? 5);
   const steps = Math.min(60, Math.max(1, Math.round(Number(b.steps) || 20)));
   const seed = Number.isFinite(Number(b.seed)) && b.seed !== null && b.seed !== ''
     ? Math.abs(Math.round(Number(b.seed)))
     : crypto.randomInt(1, 2 ** 31);
 
-  try {
-    const stats = await comfyJson('/system_stats', {}, 12000);
-    if (!stats) throw new Error('no response');
-  } catch (e) {
-    return res.status(409).json({ error: `the GPU pod is offline (${e.message})` });
-  }
+  if (!DIT.fl2va) await refreshCheckpoints();
 
   const job = {
     id: crypto.randomUUID().slice(0, 8),
@@ -563,7 +614,6 @@ app.post('/api/generate', requireAuth, async (req, res) => {
     lastFrame: b.lastFrame || null,
     refImages: b.refImages || [], refVideos: b.refVideos || [], refAudios: b.refAudios || [],
     refImageSize: b.refImageSize === 'max' ? 'max' : 'match',
-    // [{name, strength}] — the UI sends only the ones actually ticked
     loras: (Array.isArray(b.loras) ? b.loras : [])
       .filter((l) => l && typeof l.name === 'string' && l.name)
       .slice(0, 6)
@@ -571,6 +621,7 @@ app.post('/api/generate', requireAuth, async (req, res) => {
         name: l.name,
         strength: Math.max(-4, Math.min(4, Number(l.strength ?? 1) || 0)),
       })),
+    storyId: b.storyId || null,
     createdAt: Date.now(), step: 0,
   };
 
@@ -578,27 +629,62 @@ app.post('/api/generate', requireAuth, async (req, res) => {
   job.saveNode = saveNode;
   job.posterNode = posterNode;
 
+  const r = await comfyFetch('/prompt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: graph, client_id: CLIENT_ID }),
+  }, 60000);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const detail = body?.error?.message || body?.error || `HTTP ${r.status}`;
+    const nodeErrs = body?.node_errors ? ` ${JSON.stringify(body.node_errors).slice(0, 300)}` : '';
+    throw new Error(`ComfyUI rejected the graph: ${detail}${nodeErrs}`);
+  }
+  job.promptId = body.prompt_id;
+  promptToJob.set(job.promptId, job.id);
+  pushJob(job);
+  return job;
+}
+
+/** Resolve when a job reaches a terminal state. Used by the story renderer. */
+function waitForJob(jobId, { signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const tick = setInterval(() => {
+      if (signal?.aborted) {
+        clearInterval(tick);
+        return reject(new Error('cancelled'));
+      }
+      const j = jobs.get(jobId);
+      if (!j) { clearInterval(tick); return reject(new Error('job disappeared')); }
+      if (j.state === 'done') { clearInterval(tick); return resolve(j); }
+      if (j.state === 'error') { clearInterval(tick); return reject(new Error(j.error || 'generation failed')); }
+    }, 1500);
+    tick.unref?.();
+  });
+}
+
+app.post('/api/generate', requireAuth, async (req, res) => {
+  const b = req.body || {};
   try {
-    const r = await comfyFetch('/prompt', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: graph, client_id: CLIENT_ID }),
-    }, 60000);
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const detail = body?.error?.message || body?.error || `HTTP ${r.status}`;
-      const nodeErrs = body?.node_errors ? ` ${JSON.stringify(body.node_errors).slice(0, 300)}` : '';
-      return res.status(400).json({ error: `ComfyUI rejected the graph: ${detail}${nodeErrs}` });
-    }
-    job.promptId = body.prompt_id;
-    promptToJob.set(job.promptId, job.id);
-    pushJob(job);
+    const stats = await comfyJson('/system_stats', {}, 12000);
+    if (!stats) throw new Error('no response');
+  } catch (e) {
+    return res.status(409).json({ error: `the GPU pod is offline (${e.message})` });
+  }
+  try {
+    const job = await submitJob(b);
     res.json({
-      jobId: job.id, length, actualSeconds: +(length / FPS).toFixed(2), seed,
-      estimateSeconds: estimateSeconds({ width, height, frames: length, steps }),
+      jobId: job.id,
+      length: job.length,
+      actualSeconds: +(job.length / FPS).toFixed(2),
+      seed: job.seed,
+      estimateSeconds: estimateSeconds({
+        width: job.width, height: job.height, frames: job.length, steps: job.steps,
+      }),
     });
   } catch (e) {
-    res.status(502).json({ error: `could not queue the job: ${e.message}` });
+    const offline = /rejected the graph/.test(e.message) ? 400 : 502;
+    res.status(offline).json({ error: e.message });
   }
 });
 
@@ -714,6 +800,260 @@ app.get('/api/poster/:id', requireAuth, (req, res) => {
   sendFileRange(req, res, j.cachedPoster, 'image/png');
 });
 
+// ------------------------------------------------------------- story mode
+
+/**
+ * A story is a plan (from the LLM) plus one generation job per segment, chained so that
+ * each segment starts on the frame the previous one ended on, and finally concatenated.
+ */
+const stories = new Map();
+const storyOrder = [];
+const storyListeners = new Map();
+let ffmpegReady = false;
+
+function emitStory(id, payload) {
+  const set = storyListeners.get(id);
+  if (!set) return;
+  const line = `data: ${JSON.stringify(payload)}\n\n`;
+  for (const res of set) { try { res.write(line); } catch { /* gone */ } }
+  if (payload.type === 'done' || payload.type === 'error') {
+    for (const res of set) { try { res.end(); } catch {} }
+    storyListeners.delete(id);
+  }
+}
+
+function publicStory(st) {
+  if (!st) return null;
+  return {
+    storyId: st.id, state: st.state, stage: st.stage, title: st.plan?.title,
+    logline: st.plan?.logline, synopsis: st.plan?.synopsis,
+    characters: st.plan?.characters || [],
+    segmentCount: st.plan?.prompts?.length || 0,
+    secondsPerSegment: st.plan?.secondsPerSegment,
+    totalSeconds: st.plan?.totalSeconds,
+    width: st.width, height: st.height, steps: st.steps,
+    segments: (st.segments || []).map((sg) => ({
+      index: sg.index, title: sg.title, state: sg.state, jobId: sg.jobId,
+      prompt: sg.prompt, error: sg.error || undefined,
+      videoUrl: sg.jobId && jobs.get(sg.jobId)?.state === 'done' ? `/api/video/${sg.jobId}` : undefined,
+    })),
+    createdAt: st.createdAt,
+    elapsedSec: st.elapsedSec ?? null,
+    error: st.error || undefined,
+    videoUrl: st.state === 'done' ? `/api/story/${st.id}/video` : undefined,
+    concatMethod: st.concatMethod,
+  };
+}
+
+/**
+ * Render every segment in order, chaining frames between them.
+ *
+ * Strictly sequential on purpose. One pod means one GPU, so parallel submission would
+ * only fill ComfyUI's queue — and more importantly segment N+1 cannot start before
+ * segment N exists, because it begins on N's final frame.
+ */
+async function renderStory(st) {
+  st.state = 'rendering';
+  st.startedAt = Date.now();
+  const files = [];
+  let chainFrameName = st.startFrame || null;
+
+  try {
+    for (let i = 0; i < st.plan.prompts.length; i++) {
+      if (st.abort.signal.aborted) throw new Error('cancelled');
+      const seg = st.segments[i];
+      const p = st.plan.prompts[i];
+
+      st.stage = `segment ${i + 1} of ${st.plan.prompts.length}`;
+      seg.state = 'running';
+      emitStory(st.id, { type: 'segment', index: seg.index, state: 'running', stage: st.stage });
+
+      // Last segment may be pinned to a supplied closing image.
+      const isLast = i === st.plan.prompts.length - 1;
+      const lastFrame = isLast ? (st.endFrame || null) : null;
+      const mode = chainFrameName ? (lastFrame ? 'flf2v' : 'i2v') : (lastFrame ? 'flf2v' : 't2v');
+
+      const job = await submitJob({
+        prompt: p.prompt,
+        mode,
+        width: st.width, height: st.height,
+        length: st.plan.frames,
+        steps: st.steps,
+        seed: st.seed === null ? null : st.seed + i,
+        firstFrame: chainFrameName,
+        lastFrame,
+        loras: st.loras,
+        storyId: st.id,
+      });
+      seg.jobId = job.id;
+      emitStory(st.id, { type: 'segment', index: seg.index, state: 'running', jobId: job.id });
+
+      const done = await waitForJob(job.id, { signal: st.abort.signal });
+      seg.state = 'done';
+      files.push(done.cachedVideo);
+      emitStory(st.id, {
+        type: 'segment', index: seg.index, state: 'done', jobId: job.id,
+        videoUrl: `/api/video/${job.id}`,
+      });
+
+      // Hand the next segment the frame this one ended on.
+      if (i < st.plan.prompts.length - 1) {
+        const framePath = path.join(CACHE_DIR, `${st.id}-chain-${i}.jpg`);
+        await extractChainFrame(done.cachedVideo, framePath, { offsetSec: st.chainOffsetSec });
+        chainFrameName = await uploadToComfy(framePath, `chain_${st.id}_${i}.jpg`);
+      }
+    }
+
+    st.stage = 'stitching';
+    emitStory(st.id, { type: 'stage', stage: 'stitching' });
+    const out = path.join(CACHE_DIR, `${st.id}-final.mp4`);
+    const r = await concatVideos(files, out, { workDir: CACHE_DIR });
+    st.finalVideo = out;
+    st.concatMethod = r.method;
+    st.state = 'done';
+    st.stage = 'done';
+    st.elapsedSec = Math.round((Date.now() - st.startedAt) / 1000);
+    emitStory(st.id, {
+      type: 'done', storyId: st.id, videoUrl: `/api/story/${st.id}/video`,
+      durationSec: r.durationSec, elapsedSec: st.elapsedSec, method: r.method,
+    });
+  } catch (e) {
+    st.state = 'error';
+    st.error = e.message;
+    const cur = st.segments.find((x) => x.state === 'running');
+    if (cur) { cur.state = 'error'; cur.error = e.message; }
+    emitStory(st.id, { type: 'error', message: e.message });
+  }
+}
+
+/** Push a local file into ComfyUI's input/ directory and return the name it got. */
+async function uploadToComfy(filePath, name) {
+  const buf = await fsp.readFile(filePath);
+  const fd = new FormData();
+  fd.append('image', new Blob([buf], { type: 'image/jpeg' }), name);
+  fd.append('overwrite', 'true');
+  const r = await comfyFetch('/upload/image', { method: 'POST', body: fd }, 180000);
+  if (!r.ok) throw new Error(`chain-frame upload failed (${r.status})`);
+  return (await r.json()).name;
+}
+
+app.post('/api/story/plan', requireAuth, async (req, res) => {
+  if (!llmConfigured()) {
+    return res.status(503).json({ error: 'ABLITERATION_API_KEY is not configured' });
+  }
+  try {
+    const plan = await planStory(req.body || {});
+    res.json({ plan });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/story/render', requireAuth, async (req, res) => {
+  const b = req.body || {};
+  const plan = b.plan;
+  if (!plan?.prompts?.length) return res.status(400).json({ error: 'no plan supplied' });
+  if (!ffmpegReady) {
+    return res.status(503).json({ error: 'ffmpeg is not available in this container' });
+  }
+  try {
+    await comfyJson('/system_stats', {}, 12000);
+  } catch (e) {
+    return res.status(409).json({ error: `the GPU pod is offline (${e.message})` });
+  }
+
+  // Edits made in the UI's prompt boxes must win over what the LLM originally wrote.
+  if (Array.isArray(b.prompts)) {
+    plan.prompts = plan.prompts.map((p, i) => (
+      typeof b.prompts[i] === 'string' && b.prompts[i].trim()
+        ? { ...p, prompt: b.prompts[i].trim() }
+        : p));
+  }
+
+  const st = {
+    id: crypto.randomUUID().slice(0, 8),
+    plan,
+    state: 'queued', stage: 'queued',
+    width: clampMultiple(b.width, 1344),
+    height: clampMultiple(b.height, 768),
+    steps: Math.min(60, Math.max(1, Math.round(Number(b.steps) || 8))),
+    seed: b.seed === '' || b.seed === null || b.seed === undefined
+      ? null : Math.abs(Math.round(Number(b.seed))) || null,
+    startFrame: b.startFrame || null,
+    endFrame: b.endFrame || null,
+    chainOffsetSec: Math.min(1, Math.max(0, Number(b.chainOffsetSec ?? 0.12))),
+    loras: Array.isArray(b.loras) ? b.loras : [],
+    segments: plan.prompts.map((p) => ({
+      index: p.index, title: p.title, prompt: p.prompt, state: 'pending', jobId: null,
+    })),
+    createdAt: Date.now(),
+    abort: new AbortController(),
+  };
+
+  stories.set(st.id, st);
+  storyOrder.unshift(st.id);
+  while (storyOrder.length > 20) {
+    const gone = storyOrder.pop();
+    const old = stories.get(gone);
+    if (old?.finalVideo) fsp.unlink(old.finalVideo).catch(() => {});
+    stories.delete(gone);
+  }
+
+  renderStory(st).catch((e) => {
+    st.state = 'error';
+    st.error = e.message;
+  });
+
+  res.json({ storyId: st.id, segmentCount: st.segments.length });
+});
+
+app.get('/api/story', requireAuth, (req, res) => {
+  res.json({ stories: storyOrder.map((id) => publicStory(stories.get(id))).filter(Boolean) });
+});
+
+app.get('/api/story/:id', requireAuth, (req, res) => {
+  const st = stories.get(req.params.id);
+  if (!st) return res.status(404).json({ error: 'unknown story' });
+  res.json(publicStory(st));
+});
+
+app.get('/api/story/:id/events', requireAuth, (req, res) => {
+  const st = stories.get(req.params.id);
+  if (!st) return res.status(404).json({ error: 'unknown story' });
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders?.();
+  if (!storyListeners.has(st.id)) storyListeners.set(st.id, new Set());
+  storyListeners.get(st.id).add(res);
+
+  res.write(`data: ${JSON.stringify({ type: 'snapshot', story: publicStory(st) })}\n\n`);
+  if (st.state === 'done' || st.state === 'error') return res.end();
+
+  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+  req.on('close', () => {
+    clearInterval(ping);
+    storyListeners.get(st.id)?.delete(res);
+  });
+});
+
+app.post('/api/story/:id/cancel', requireAuth, async (req, res) => {
+  const st = stories.get(req.params.id);
+  if (!st) return res.status(404).json({ error: 'unknown story' });
+  st.abort.abort();
+  try { await comfyFetch('/interrupt', { method: 'POST' }, 15000); } catch { /* best effort */ }
+  res.json({ ok: true });
+});
+
+app.get('/api/story/:id/video', requireAuth, (req, res) => {
+  const st = stories.get(req.params.id);
+  if (!st?.finalVideo) return res.sendStatus(404);
+  sendFileRange(req, res, st.finalVideo, 'video/mp4');
+});
+
 app.get('/healthz', (req, res) => res.json({ ok: true, comfyConfigured: !!COMFY_URL }));
 
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '5m' }));
@@ -724,6 +1064,11 @@ function clampMultiple(v, dflt) {
   const snapped = Math.round(n / 32) * 32;
   return Math.min(2048, Math.max(256, snapped));
 }
+
+ffmpegAvailable().then((ok) => {
+  ffmpegReady = ok;
+  if (!ok) console.warn('  ffmpeg  : MISSING — story mode is disabled');
+});
 
 app.listen(PORT, () => {
   console.log(`H3 Studio on :${PORT}`);

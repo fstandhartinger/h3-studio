@@ -21,11 +21,25 @@
     <div class="login-mark" aria-hidden="true">H3</div>
     <h1 class="login-title">H3 Studio</h1>
     <p class="login-sub">Video <em>and</em> synchronized stereo audio, straight out of the model.</p>
+    <!--
+      Deliberately type="text" with CSS masking, not type="password".
+      Every Sandy app is a subdomain of app.mintapis.com, so Chrome's password manager
+      keys them all to one registrable domain and offers a credential saved for any one
+      of them in every other one's login field. Keeping this field out of the password
+      manager is the fix until app.mintapis.com is on the Public Suffix List.
+    -->
     <label class="field">
       <span class="field-label" id="login-pw-label">Password</span>
-      <input id="login-password" type="password" name="password" autocomplete="current-password"
-             aria-labelledby="login-pw-label" required autofocus>
+      <span class="pw-wrap">
+        <input id="login-password" type="text" class="masked" name="h3studio-access-code"
+               aria-labelledby="login-pw-label" required autofocus
+               autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+               data-form-type="other" data-1p-ignore data-lpignore="true" data-bwignore>
+        <button type="button" class="pw-reveal" id="login-reveal"
+                aria-label="Show password" title="Show password">show</button>
+      </span>
     </label>
+    <p class="login-note">Enter it once — this browser stays signed in.</p>
     <p class="login-error" id="login-error" role="alert" hidden></p>
     <button class="btn btn-primary btn-block" type="submit" id="login-submit">Unlock</button>
   </form>
@@ -87,7 +101,12 @@
     <span id="offline-detail">Generation is unavailable until a RunPod instance is up and ComfyUI answers. Existing results below still play.</span>
   </div>
 
-  <main class="layout">
+  <nav class="viewswitch" role="tablist" aria-label="Workspace">
+    <button role="tab" class="vtab" id="vtab-clip"  aria-selected="true"  aria-controls="view-clip">Single clip</button>
+    <button role="tab" class="vtab" id="vtab-story" aria-selected="false" aria-controls="view-story" tabindex="-1">Story</button>
+  </nav>
+
+  <main class="layout" id="view-clip">
 
     <!-- ═════════ LEFT: controls ═════════ -->
     <section class="panel controls" aria-label="Generation controls">
@@ -386,6 +405,99 @@
     </section>
   </main>
 
+  <!-- ───────────────────────── Story mode ───────────────────────── -->
+  <main class="layout" id="view-story" hidden>
+
+    <section class="panel controls" aria-label="Story controls">
+      <h2 class="panel-title">Story</h2>
+      <p class="note">
+        An LLM writes the arc, the scenes and one H3 prompt per shot. Each shot then starts
+        on the <em>actual last frame</em> of the shot before it, so faces, wardrobe and
+        lighting carry over exactly. The finished shots are stitched into one film.
+      </p>
+
+      <label class="field">
+        <span class="field-label"><label for="story-premise">Premise</label></span>
+        <textarea id="story-premise" class="prompt" rows="4" spellcheck="true"
+          placeholder="One or two sentences. Who, where, and what goes wrong."></textarea>
+      </label>
+
+      <div class="row">
+        <label class="field">
+          <span class="field-label"><label for="story-segments">Shots</label></span>
+          <input id="story-segments" type="number" min="1" max="24" value="4" inputmode="numeric">
+        </label>
+        <label class="field">
+          <span class="field-label"><label for="story-seclen">Seconds per shot</label></span>
+          <input id="story-seclen" type="number" min="2" max="15" step="0.5" value="5" inputmode="decimal">
+        </label>
+      </div>
+
+      <label class="field">
+        <span class="field-label"><label for="story-style">Visual style</label></span>
+        <input id="story-style" type="text" value="cinematic 35mm, natural light, muted contemporary grade">
+      </label>
+      <label class="field">
+        <span class="field-label"><label for="story-language">Spoken language</label></span>
+        <input id="story-language" type="text" value="English">
+      </label>
+
+      <details class="adv">
+        <summary>Render settings</summary>
+        <div class="row">
+          <label class="field">
+            <span class="field-label"><label for="story-width">Width</label></span>
+            <input id="story-width" type="number" min="256" max="2048" step="32" value="1344">
+          </label>
+          <label class="field">
+            <span class="field-label"><label for="story-height">Height</label></span>
+            <input id="story-height" type="number" min="256" max="2048" step="32" value="768">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field">
+            <span class="field-label"><label for="story-steps">Steps</label></span>
+            <input id="story-steps" type="number" min="1" max="60" value="6">
+          </label>
+          <label class="field">
+            <span class="field-label"><label for="story-chain-offset">Chain offset (s)</label></span>
+            <input id="story-chain-offset" type="number" min="0" max="1" step="0.04" value="0.12">
+          </label>
+        </div>
+        <p class="note">6–8 steps on a TURBO checkpoint, 20 on a non-turbo one. The chain
+          offset is how far before the end the hand-off frame is taken — the very last
+          frame is often the most motion-blurred.</p>
+      </details>
+
+      <div class="row">
+        <button class="btn btn-primary" type="button" id="story-plan-btn">Write the story</button>
+        <button class="btn" type="button" id="story-render-btn" disabled>Render all shots</button>
+        <button class="btn btn-ghost" type="button" id="story-cancel-btn" hidden>Cancel</button>
+      </div>
+      <p class="note" id="story-status" aria-live="polite"></p>
+    </section>
+
+    <section class="panel results" aria-label="Story plan and result">
+      <div id="story-final" hidden>
+        <h3 class="panel-title">Finished film</h3>
+        <video id="story-video" class="result-video" controls playsinline></video>
+        <p class="note num" id="story-final-note"></p>
+        <a class="btn btn-ghost btn-sm" id="story-download" download>Download</a>
+      </div>
+      <div id="story-plan" hidden>
+        <h3 class="panel-title" id="story-title"></h3>
+        <p class="note" id="story-logline"></p>
+        <details class="adv"><summary>Synopsis &amp; characters</summary>
+          <p class="note" id="story-synopsis"></p>
+          <div id="story-characters"></div>
+        </details>
+        <div id="story-segments-list"></div>
+      </div>
+      <p class="note" id="story-empty">No story yet. Write one on the left.</p>
+    </section>
+
+  </main>
+
   <footer class="footer">
     <span>Self‑hosted MiniMax H3 · ComfyUI · RTX PRO 6000 Blackwell</span>
     <span class="footer-sep" aria-hidden="true">·</span>
@@ -399,5 +511,6 @@
 <div class="toasts" id="toasts" aria-live="assertive" aria-atomic="false"></div>
 
 <script type="module" src="app.js"></script>
+<script type="module" src="story.js"></script>
 </body>
 </html>

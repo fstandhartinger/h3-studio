@@ -739,3 +739,68 @@ input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.16); }
 .lora-row[data-on="false"] .lora-strength { display: none; }
 .lora-strength input[type="range"] { width: 100%; }
 .lora-strength .num { font-size: .8125rem; min-width: 2.75rem; text-align: right; }
+
+/* ── Shared-secret gate ───────────────────────────────────────────────
+   The password field is type="text" (see index.html for why) and masked in CSS.
+   Where the browser supports neither text-security property, app.js falls back to
+   a real password input — an unmasked secret on screen is worse than the
+   cross-app autofill this avoids. */
+.pw-wrap { position: relative; display: block; }
+#login-password.masked {
+  -webkit-text-security: disc;
+  text-security: disc;
+  letter-spacing: .12em;
+}
+.pw-reveal {
+  position: absolute; right: .5rem; top: 50%; transform: translateY(-50%);
+  background: none; border: 0; cursor: pointer; padding: .25rem .4rem;
+  font: inherit; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted, #9b96b0); border-radius: 6px;
+}
+.pw-reveal:hover { color: var(--fg, #eee); background: rgba(255,255,255,.06); }
+.login-note { margin: .4rem 0 0; font-size: .8rem; color: var(--muted, #9b96b0); text-align: center; }
+
+/* ── Workspace switch: single clip vs story ─────────────────────────── */
+.viewswitch {
+  display: flex; gap: .4rem; padding: .75rem 1.25rem 0;
+  max-width: 1600px; margin: 0 auto; width: 100%;
+}
+.vtab {
+  appearance: none; border: 1px solid var(--line, #2a2440);
+  background: var(--panel, #17142433); color: var(--muted, #9b96b0);
+  padding: .5rem 1.1rem; border-radius: 10px 10px 0 0;
+  font: inherit; font-weight: 600; cursor: pointer; border-bottom-color: transparent;
+}
+.vtab[aria-selected="true"] {
+  background: var(--panel-solid, #1b1729); color: var(--fg, #eee);
+  border-color: var(--accent, #a78bfa);
+}
+.vtab:focus-visible { outline: 2px solid var(--accent, #a78bfa); outline-offset: 2px; }
+
+/* ── Story panel ─────────────────────────────────────────────────────── */
+.story-seg { margin: .6rem 0; }
+.story-seg > summary {
+  display: flex; align-items: center; gap: .6rem; cursor: pointer;
+  padding: .5rem .2rem; font-weight: 600;
+}
+.story-seg-n {
+  display: inline-grid; place-items: center;
+  width: 1.6rem; height: 1.6rem; border-radius: 50%;
+  background: var(--accent-dim, #2c2450); color: var(--accent, #a78bfa);
+  font-size: .8rem; font-variant-numeric: tabular-nums;
+}
+.story-seg-state {
+  margin-left: auto; font-size: .72rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em;
+  padding: .15rem .5rem; border-radius: 999px;
+  background: rgba(255,255,255,.06); color: var(--muted, #9b96b0);
+}
+.story-seg-state[data-state="running"] { background: #3b2f14; color: #f0c674; }
+.story-seg-state[data-state="done"]    { background: #14321f; color: #7ee2a8; }
+.story-seg-state[data-state="error"]   { background: #3a1a1a; color: #f08a8a; }
+.story-seg textarea.prompt { width: 100%; margin-top: .4rem; }
+.story-seg video { margin-top: .6rem; width: 100%; border-radius: 10px; }
+
+#story-status[data-kind="error"] { color: #f08a8a; }
+#story-status[data-kind="warn"]  { color: #f0c674; }
+#story-status[data-kind="ok"]    { color: #7ee2a8; }
