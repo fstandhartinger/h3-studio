@@ -21,6 +21,13 @@ def head():
 total, real = head()
 print('size %.2f GB' % (total/1e9), flush=True)
 
+# The file is preallocated to its final size before a single byte of content arrives, so
+# size alone proves nothing -- and neither does a safetensors header check, because the
+# header lands in the first chunk. Completeness needs its own marker.
+MARKER = DEST + '.complete'
+if os.path.exists(MARKER):
+    os.remove(MARKER)
+
 if not os.path.exists(DEST) or os.path.getsize(DEST) != total:
     with open(DEST, 'wb') as f:
         f.truncate(total)
@@ -77,4 +84,9 @@ os.close(fd)
 got = os.path.getsize(DEST)
 print('DONE %s %.2f GB (expected %.2f)' % (DEST, got/1e9, total/1e9), flush=True)
 print('failed chunks: %r' % failed, flush=True)
-print('PDL_OK' if (done_bytes[0] >= total and not failed) else 'PDL_INCOMPLETE', flush=True)
+ok = done_bytes[0] >= total and not failed and got == total
+if ok:
+    with open(MARKER, 'w') as f:
+        f.write(str(total))
+print('PDL_OK' if ok else 'PDL_INCOMPLETE', flush=True)
+raise SystemExit(0 if ok else 1)

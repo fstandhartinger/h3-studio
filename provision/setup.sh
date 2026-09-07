@@ -6,6 +6,17 @@
 # polls. Anything more structured would be nicer, but this survives a dropped ssh
 # connection, which a streamed stdout does not.
 exec >> /workspace/setup.log 2>&1
+
+# Exactly one installer at a time. A second run started while the first was still
+# downloading raced it into the same files and then "verified" them successfully, because
+# a preallocated file is already the right size. Two writers, one of them declaring
+# victory over the other's half-finished work.
+exec 9> /workspace/setup.lock
+if ! flock -n 9; then
+  echo "another setup.sh is already running; refusing to start a second"
+  exit 0
+fi
+
 set -x
 export PIP_ROOT_USER_ACTION=ignore
 phase() { echo "$1" > /workspace/phase; date -u +"PHASE $1 %H:%M:%S"; }
@@ -53,12 +64,16 @@ wait $D1 $D2 $D3 $D4 ${D5:-} ${D6:-} ${D7:-}
 phase verify
 cd /workspace/ComfyUI/models
 mkdir -p diffusion_models text_encoders vae loras
-ln -sf /workspace/models/diffusion_models/*.safetensors diffusion_models/
-ln -sf /workspace/models/text_encoders/*.safetensors    text_encoders/
-ln -sf /workspace/models/vae/*.safetensors              vae/
+for d in diffusion_models text_encoders vae; do
+  for f in /workspace/models/$d/*.safetensors; do [ -e "$f" ] && ln -sf "$f" "$d/"; done
+done
 
-# A truncated checkpoint loads far enough to waste a whole pod before it fails, so the
-# safetensors header is checked against the file size before ComfyUI ever sees it.
+# Two independent checks, because each misses what the other catches:
+#   - the .complete marker proves every byte was actually fetched. Size cannot: pdl.py
+#     preallocates the file, so a half-downloaded checkpoint is already full-size.
+#   - the safetensors header proves the file is the shape a loader expects, which catches
+#     a marker left behind by an older or interrupted run.
+# A checkpoint that fails either loads far enough to waste a whole pod before dying.
 python3 - <<'PYV'
 import json, os, struct, sys
 bad = []
@@ -67,6 +82,8 @@ for root, _, files in os.walk('/workspace/models'):
         if not f.endswith('.safetensors'):
             continue
         p = os.path.join(root, f)
+        if not os.path.exists(p + '.complete'):
+            print('%-60s INCOMPLETE (no download marker)' % f); bad.append(f); continue
         try:
             with open(p, 'rb') as fh:
                 n = struct.unpack('<Q', fh.read(8))[0]
@@ -78,6 +95,9 @@ for root, _, files in os.walk('/workspace/models'):
         print('%-60s %s' % (f, 'OK' if need == got else 'TRUNCATED need=%d got=%d' % (need, got)))
         if need != got:
             bad.append(f)
+if not bad:
+    print('all %d checkpoints verified' % sum(
+        1 for r, _, fs in os.walk('/workspace/models') for x in fs if x.endswith('.safetensors')))
 sys.exit(1 if bad else 0)
 PYV
 if [ $? -ne 0 ]; then phase failed; exit 1; fi
