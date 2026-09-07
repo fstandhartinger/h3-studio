@@ -29,7 +29,28 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------- config
 
 const PORT = process.env.PORT || 3000;
-const COMFY_URL = (process.env.COMFY_URL || '').replace(/\/+$/, '');
+/**
+ * The ComfyUI endpoint. Not a constant: when a pod is started from the UI its proxy URL
+ * becomes the endpoint, so the app follows the GPU it just rented without a redeploy.
+ * The env var is only the starting value, for a pod rented outside this app.
+ */
+let COMFY_URL = (process.env.COMFY_URL || '').replace(/\/+$/, '');
+
+export function setComfyUrl(url) {
+  const next = (url || '').replace(/\/+$/, '');
+  if (next === COMFY_URL) return;
+  COMFY_URL = next;
+  console.log(`  ComfyUI -> ${COMFY_URL || '(none)'}`);
+  // The websocket is bound to the old host; drop it so it reconnects to the new one.
+  DIT = { fl2va: null, ref2va: null, available: [] };
+  IMG = { unet: null, clip: null, vae: null, available: false };
+  try { ws?.close(); } catch { /* already gone */ }
+  ws = null;
+  if (COMFY_URL) {
+    connectWs();
+    refreshCheckpoints().catch(() => {});
+  }
+}
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const POD_DEADLINE = process.env.POD_DEADLINE || ''; // ISO8601, optional
@@ -1382,6 +1403,7 @@ function clampMultiple(v, dflt) {
   return Math.min(2048, Math.max(256, snapped));
 }
 
+pod.setComfyUrlSink(setComfyUrl);
 pod.init().catch((e) => console.warn('  pod control init failed:', e.message));
 
 ffmpegAvailable().then((ok) => {

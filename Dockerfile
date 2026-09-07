@@ -9,8 +9,9 @@ FROM node:22-bookworm-slim
 # healthcheck INSIDE the container with curl or wget and ignores the HEALTHCHECK below,
 # so a slim image without one is reported unhealthy and the deploy is rolled back even
 # though the app started correctly. That is exactly what happened on the first deploy.
+# openssh-client: new pods are provisioned over ssh/scp from inside this container.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -21,6 +22,7 @@ RUN npm ci --omit=dev
 COPY server.js ./
 COPY lib ./lib
 COPY public ./public
+COPY provision ./provision
 
 # Cached renders live here. A container restart loses them, which is acceptable:
 # the pod they came from is itself hourly, and the gallery is a convenience.
