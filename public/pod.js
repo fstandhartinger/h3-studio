@@ -6,6 +6,8 @@
  * derived from a server-supplied deadline and rate, so local ticking cannot drift from
  * the truth by more than the poll interval.
  */
+import { whenAuthed } from './authed.js';
+
 const $ = (s) => document.querySelector(s);
 
 async function api(path, opts = {}) {
@@ -32,7 +34,7 @@ const el = {
   msg: $('#pod-msg'),
 };
 
-if (el.bar) init();
+if (el.bar) whenAuthed().then(init);
 
 function init() {
   let pod = null;

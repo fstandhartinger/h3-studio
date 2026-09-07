@@ -10,6 +10,8 @@
  * hand, or ask the LLM to revise the prompt from a plain-language note. Plus upload, for
  * when none of that gets there.
  */
+import { whenAuthed } from './authed.js';
+
 const $ = (s) => document.querySelector(s);
 
 async function api(path, opts = {}) {
@@ -54,7 +56,7 @@ const el = {
   download: $('#board-download'),
 };
 
-if (el.view && el.tab) init();
+if (el.view && el.tab) whenAuthed().then(init);
 
 function init() {
   // keyframe index (1-based) -> { imageId, url, comfyName, busy }
