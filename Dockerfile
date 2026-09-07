@@ -5,8 +5,12 @@
 # single-clip mode without it rather than crashing, but the headline feature is gone.
 FROM node:22-bookworm-slim
 
+# curl is not optional either, though for an unobvious reason: Coolify runs its own
+# healthcheck INSIDE the container with curl or wget and ignores the HEALTHCHECK below,
+# so a slim image without one is reported unhealthy and the deploy is rolled back even
+# though the app started correctly. That is exactly what happened on the first deploy.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,6 +32,6 @@ RUN mkdir -p /app/cache
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD curl -fsS http://127.0.0.1:3000/healthz || exit 1
 
 CMD ["node", "server.js"]
