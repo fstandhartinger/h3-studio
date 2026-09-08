@@ -19,8 +19,31 @@ async function api(path, opts = {}) {
   const text = await res.text();
   let body = null;
   if (text) { try { body = JSON.parse(text); } catch { /* non-JSON */ } }
-  if (!res.ok) throw new Error((body && (body.error || body.message)) || `HTTP ${res.status}`);
+  if (!res.ok) {
+    // A JSON body is the app explaining itself. A bare 502/503/504 is the gateway
+    // speaking for an app that is not there -- typically mid-restart during a deploy --
+    // and the request was cut, not refused. Worth naming, because "HTTP 502" reads as
+    // "the feature is broken" when it means "try again in a moment".
+    const gateway = !body && [502, 503, 504].includes(res.status);
+    const e = new Error(gateway
+      ? `the server was restarting (HTTP ${res.status}) — try again in a moment`
+      : (body && (body.error || body.message)) || `HTTP ${res.status}`);
+    e.status = res.status;
+    e.gateway = gateway;
+    throw e;
+  }
   return body;
+}
+
+/** One automatic retry for a request the gateway cut. Anything else fails immediately. */
+async function apiRetryOnce(path, opts, { delayMs = 4000 } = {}) {
+  try {
+    return await api(path, opts);
+  } catch (e) {
+    if (!e.gateway) throw e;
+    await new Promise((r) => setTimeout(r, delayMs));
+    return api(path, opts);
+  }
 }
 
 const el = {
@@ -289,7 +312,7 @@ function init() {
     state.dataset.state = 'running';
     state.textContent = 'drawing';
     try {
-      const r = await api('/api/image/generate', {
+      const r = await apiRetryOnce('/api/image/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
