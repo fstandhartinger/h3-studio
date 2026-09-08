@@ -875,3 +875,38 @@ input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.16); }
 #board-status[data-kind="error"] { color: #f08a8a; }
 #board-status[data-kind="warn"]  { color: #f0c674; }
 #board-status[data-kind="ok"]    { color: #7ee2a8; }
+
+/* ── GPU banner tones: "setting up" and "no GPU" are not emergencies ─────── */
+.banner-offline[data-tone="info"] {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.banner-offline[data-tone="info"] strong { color: var(--accent); }
+.banner-offline[data-tone="warn"] {
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.banner-offline[data-tone="warn"] strong { color: var(--warn); }
+
+/* ── Pod bar: phase with a progress bar underneath while installing ──────── */
+.pod-phasebox { display: inline-flex; flex-direction: column; gap: .25rem; min-width: 12rem; }
+.pod-progress {
+  display: block; height: 4px; border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--text-3, #888) 25%, transparent);
+}
+.pod-progress-fill {
+  display: block; height: 100%; border-radius: 999px;
+  background: var(--accent); transition: width .6s ease;
+}
+.pod-hint { opacity: .8; }
+.pod-hint[hidden] { display: none; }
+
+/* ── Pod activity log: collapsed by default, there when something looks stuck ── */
+.pod-log {
+  max-width: 1600px; margin: .3rem auto 0; width: 100%;
+  padding: 0 1.25rem; font-size: .78rem; color: var(--muted, #9b96b0);
+}
+.pod-log summary { cursor: pointer; user-select: none; }
+.pod-log-lines { margin: .3rem 0 0; padding-left: 1.2rem; display: grid; gap: .15rem; }
+.pod-log-lines li { font-variant-numeric: tabular-nums; }
+.pod-log-lines time { opacity: .7; margin-right: .5rem; }

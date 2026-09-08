@@ -95,9 +95,9 @@
     </div>
   </header>
 
-  <!-- offline banner -->
-  <div class="banner banner-offline" id="offline-banner" role="alert" hidden>
-    <strong>The pod is offline.</strong>
+  <!-- GPU state banner: setting up / no GPU / actually broken. Tone follows data-tone. -->
+  <div class="banner banner-offline" id="offline-banner" role="status" data-tone="danger" hidden>
+    <strong id="offline-title">The pod is offline.</strong>
     <span id="offline-detail">Generation is unavailable until a RunPod instance is up and ComfyUI answers. Existing results below still play.</span>
   </div>
 
@@ -115,15 +115,20 @@
         <label class="pod-hours">
           <span>max hours</span>
           <input id="pod-hours" type="number" min="0.25" max="10" step="0.25" value="1"
-                 inputmode="decimal" required>
+                 inputmode="decimal" required aria-describedby="pod-hint">
         </label>
         <button class="btn btn-primary btn-sm" type="button" id="pod-start">Start pod</button>
       </div>
 
       <div class="pod-live" id="pod-live" hidden>
         <span class="pod-dot" id="pod-dot" data-state="provisioning" aria-hidden="true"></span>
-        <span class="pod-phase" id="pod-phase">starting…</span>
-        <span class="pod-metric" title="Time until the pod is terminated">
+        <span class="pod-phasebox">
+          <span class="pod-phase" id="pod-phase">starting…</span>
+          <span class="pod-progress" id="pod-progress" hidden aria-hidden="true">
+            <span class="pod-progress-fill" id="pod-progress-fill" style="width:0%"></span>
+          </span>
+        </span>
+        <span class="pod-metric" id="pod-timer-box" title="Time until the pod is terminated">
           ⏳ <span class="num" id="pod-timer">–</span>
         </span>
         <span class="pod-metric" title="Billed so far, from the moment the pod was rented">
@@ -134,7 +139,13 @@
       </div>
     </div>
   </div>
+  <!-- Hint under the hours field: setup eats ~15 min, and what the budget costs. -->
+  <p class="pod-note pod-hint" id="pod-hint">Setup takes about 15 minutes of that. 1 h ≈ 45 min of generation · ≈ $2.09</p>
   <p class="pod-note" id="pod-msg" role="status" hidden></p>
+  <details class="pod-log" id="pod-log" hidden>
+    <summary>Pod activity</summary>
+    <ol class="pod-log-lines" id="pod-log-lines"></ol>
+  </details>
 
   <main class="layout" id="view-clip">
 

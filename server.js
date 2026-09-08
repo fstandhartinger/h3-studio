@@ -590,10 +590,19 @@ app.get('/api/status', requireAuth, async (req, res) => {
     models: { fl2va: false, ref2va: false, dit: null, available: [] },
     story: { llm: llmConfigured(), ffmpeg: ffmpegReady },
     image: { ...IMG },
+    // The managed pod, if any. Lets the UI say "installing, step 5 of 8" instead of
+    // "COMFY_URL is not configured" while a pod this app rented is still setting up.
+    pod: pod.status().pod,
     deadline: { iso: deadlineIso, secondsLeft },
     fps: FPS, usdPerHour: GPU_USD_PER_HOUR,
   };
-  if (!COMFY_URL) return res.json({ ...base, error: 'COMFY_URL is not configured' });
+  if (!COMFY_URL) {
+    const p = base.pod;
+    const error = p && p.state === 'provisioning' ? 'the GPU is still being set up'
+      : p && p.state === 'error' ? `pod setup failed: ${p.error || 'unknown error'}`
+      : 'no GPU is running';
+    return res.json({ ...base, error });
+  }
   try {
     const [stats, queue, unets] = await Promise.all([
       comfyJson('/system_stats', {}, 15000),

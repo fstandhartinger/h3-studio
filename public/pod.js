@@ -7,6 +7,7 @@
  * the truth by more than the poll interval.
  */
 import { whenAuthed } from './authed.js';
+import { describePhase, fmtMinutes, TYPICAL_MINUTES } from './phases.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -29,10 +30,19 @@ const el = {
   extend: $('#pod-extend'),
   dot: $('#pod-dot'),
   phase: $('#pod-phase'),
+  progress: $('#pod-progress'),
+  progressFill: $('#pod-progress-fill'),
   timer: $('#pod-timer'),
+  timerBox: $('#pod-timer-box'),
   cost: $('#pod-cost'),
   msg: $('#pod-msg'),
+  hint: $('#pod-hint'),
+  logBox: $('#pod-log'),
+  logLines: $('#pod-log-lines'),
 };
+
+// Measured across five installs: 12 min on a good day, 16 on a slow-PyPI day.
+const SETUP_MINUTES = 15;
 
 if (el.bar) whenAuthed().then(init);
 
@@ -58,18 +68,54 @@ function init() {
     el.msg.hidden = !text;
   }
 
+  // The hint under the hours field: what the budget buys, and what it costs.
+  function paintHint() {
+    const h = Number(el.hours.value);
+    if (!Number.isFinite(h) || h <= 0) { el.hint.textContent = 'Enter a budget in hours (up to 10).'; return; }
+    const usable = Math.max(0, h * 60 - SETUP_MINUTES);
+    el.hint.textContent = usable < 20
+      ? `Setup alone takes ~${SETUP_MINUTES} min — a ${h} h budget leaves only ~${Math.round(usable)} min of generation. ≈ $${(h * usdPerHour).toFixed(2)}`
+      : `Setup takes ~${SETUP_MINUTES} min of that. ${h} h ≈ ${Math.round(usable)} min of generation · ≈ $${(h * usdPerHour).toFixed(2)}`;
+  }
+  el.hours.addEventListener('input', paintHint);
+
+  function paintLog(lines) {
+    if (!Array.isArray(lines) || !lines.length) { el.logBox.hidden = true; return; }
+    el.logBox.hidden = false;
+    el.logLines.replaceChildren(...lines.slice(-10).map((l) => {
+      const li = document.createElement('li');
+      const t = document.createElement('time');
+      t.dateTime = new Date(l.t).toISOString();
+      t.textContent = new Date(l.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      li.append(t, document.createTextNode(l.msg));
+      return li;
+    }));
+  }
+
   function paint() {
     const running = pod && pod.state !== 'stopped';
     el.idle.hidden = !!running;
     el.live.hidden = !running;
-    if (!running) return;
+    el.hint.hidden = !!running;
+    if (!running) { paintHint(); return; }
 
     // Interpolate between server snapshots so the numbers move every second.
     const drift = (Date.now() - syncedAt) / 1000;
     const elapsed = (pod.elapsedSec ?? 0) + drift;
 
     el.dot.dataset.state = pod.state;
-    el.phase.textContent = pod.state === 'running' ? 'GPU ready' : (pod.phase || pod.state);
+    if (pod.state === 'provisioning') {
+      const ph = describePhase(pod.phase);
+      el.phase.textContent = `Setting up · ${ph.step}/${ph.total} ${ph.label} · ${fmtMinutes(elapsed)}`;
+      el.phase.title = `Usually ${TYPICAL_MINUTES} min in total`;
+      el.progress.hidden = false;
+      el.progressFill.style.width = `${ph.pct}%`;
+    } else {
+      el.phase.textContent = pod.state === 'running' ? 'GPU ready'
+        : pod.state === 'error' ? 'Setup failed — see Pod activity' : (pod.phase || pod.state);
+      el.phase.title = '';
+      el.progress.hidden = true;
+    }
 
     if (pod.secondsLeft == null) {
       // A pod this app did not rent states no budget, and the app does not invent one.
@@ -84,7 +130,9 @@ function init() {
       el.timer.textContent = fmtLeft(left);
       el.timer.parentElement.dataset.level =
         left < 300 ? 'danger' : left < 900 ? 'warn' : 'ok';
-      el.timer.parentElement.title = 'Time until the pod is terminated';
+      el.timer.parentElement.title =
+        `Terminates at ${new Date(pod.deadline).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+        + ' unless extended';
     }
 
     el.cost.textContent = `$${((elapsed / 3600) * usdPerHour).toFixed(2)}`;
@@ -97,6 +145,7 @@ function init() {
     if (st.usdPerHour) usdPerHour = st.usdPerHour;
     pod = st.pod || null;
     syncedAt = Date.now();
+    if (st.log) paintLog(st.log);
     paint();
   }
 
@@ -117,7 +166,27 @@ function init() {
       if (m.type === 'snapshot') return apply(m);
       if (m.pod) { pod = m.pod; syncedAt = Date.now(); paint(); }
       if (m.type === 'phase') say(`Setting up the pod: ${m.phase}`);
-      if (m.type === 'ready') { say('GPU is ready.', 'ok'); poll(); }
+      if (m.type === 'ready') {
+        // A 1 h budget minus a 15 min install is 45 min of use; say so while it can
+        // still be fixed with one click, not when the timer hits zero mid-render.
+        const left = m.pod?.secondsLeft ?? pod?.secondsLeft;
+        if (left != null && left < 45 * 60) {
+          say(`GPU is ready — but only ${fmtMinutes(left)} remain on the budget. Press +1 h if you need longer.`, 'warn');
+        } else {
+          say('GPU is ready.', 'ok');
+        }
+        poll();
+      }
+      if (m.type === 'log' && m.msg) {
+        // keep the visible log live between polls
+        const li = document.createElement('li');
+        const t = document.createElement('time');
+        t.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        li.append(t, document.createTextNode(m.msg));
+        el.logBox.hidden = false;
+        el.logLines.append(li);
+        while (el.logLines.children.length > 10) el.logLines.firstChild.remove();
+      }
       if (m.type === 'error') say(m.message, 'error');
       if (m.type === 'stopped' || m.type === 'gone') { pod = null; paint(); poll(); }
       if (m.type === 'log') console.debug('[pod]', m.msg);
@@ -134,7 +203,8 @@ function init() {
       return;
     }
     el.start.disabled = true;
-    say(`Renting an RTX PRO 6000 for ${hours} h. Installing the models takes about 12 minutes.`);
+    say(`Renting an RTX PRO 6000 for ${hours} h. Installing the models takes about ${TYPICAL_MINUTES} minutes — `
+      + 'the bar above shows each step.');
     try {
       apply(await api('/api/pod/start', {
         method: 'POST',

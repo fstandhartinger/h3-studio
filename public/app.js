@@ -1,3 +1,4 @@
+import { describePhase, fmtMinutes, TYPICAL_MINUTES } from './phases.js';
 /* ==========================================================================
    H3 Studio — front end for a self-hosted MiniMax H3 (video + native audio)
    running in ComfyUI on a remote RunPod RTX PRO 6000.
@@ -265,6 +266,7 @@ const el = {
   statDeadline: $('#stat-deadline'),
   deadlineText: $('#deadline-text'),
   offlineBanner: $('#offline-banner'),
+  offlineTitle: $('#offline-title'),
   offlineDetail: $('#offline-detail'),
 
   tabs: $$('.tab'),
@@ -415,9 +417,15 @@ async function pollStatus() {
 function renderStatus(s) {
   const online = !!s.online;
 
-  el.dot.dataset.state = online ? 'online' : 'offline';
-  el.statusText.textContent = online ? 'Online' : 'Offline';
-  el.statusText.style.color = online ? 'var(--ok)' : 'var(--danger)';
+  // Three offline flavours, because "Offline" in red while a pod you just rented is
+  // installing reads as a failure — and this morning it was read as exactly that.
+  const pod = s.pod || null;
+  const settingUp = !online && pod && pod.state === 'provisioning';
+  const noPod = !online && !pod;
+  el.dot.dataset.state = online ? 'online' : settingUp ? 'unknown' : 'offline';
+  el.statusText.textContent = online ? 'Online' : settingUp ? 'Setting up' : noPod ? 'No GPU' : 'Offline';
+  el.statusText.style.color = online ? 'var(--ok)' : settingUp ? 'var(--warn)'
+    : noPod ? 'var(--text-3)' : 'var(--danger)';
 
   const gpu = s.gpu || {};
   el.gpuName.textContent = gpu.name || 'GPU';
@@ -454,11 +462,33 @@ function renderStatus(s) {
   }
   tickDeadline();
 
-  // offline banner
+  // GPU banner. Tone and wording follow what is actually happening, not just "offline".
   el.offlineBanner.hidden = online;
-  if (!online) {
+  if (settingUp) {
+    const ph = describePhase(pod.phase);
+    el.offlineBanner.dataset.tone = 'info';
+    el.offlineTitle.textContent = 'The GPU is being set up.';
+    el.offlineDetail.textContent =
+      `Step ${ph.step} of ${ph.total}: ${ph.label} — ${fmtMinutes(pod.elapsedSec)} elapsed, `
+      + `usually ${TYPICAL_MINUTES} min in total. Generation opens automatically when it is ready. `
+      + 'Clips already rendered still play.';
+  } else if (noPod) {
+    el.offlineBanner.dataset.tone = 'info';
+    el.offlineTitle.textContent = 'No GPU is running.';
+    el.offlineDetail.textContent =
+      'Start one from the bar above — it rents an RTX PRO 6000 and installs the models, '
+      + `about ${TYPICAL_MINUTES} minutes. Clips already rendered still play.`;
+  } else if (!online && pod && pod.state === 'error') {
+    el.offlineBanner.dataset.tone = 'danger';
+    el.offlineTitle.textContent = 'Pod setup failed.';
+    el.offlineDetail.textContent =
+      `${pod.error || 'Unknown error.'} The pod is still rented and still billing — stop it from the bar above, `
+      + 'or open "Pod activity" below it to see what happened.';
+  } else if (!online) {
+    el.offlineBanner.dataset.tone = 'danger';
+    el.offlineTitle.textContent = 'The pod is unreachable.';
     el.offlineDetail.textContent = s.error
-      ? `${s.error} — generation is unavailable until the pod is back. Clips already rendered still play.`
+      ? `${s.error} — generation is unavailable until it answers again. Clips already rendered still play.`
       : 'The RunPod instance is gone or unreachable, so generation is unavailable. Clips already rendered still play.';
   }
 
@@ -475,6 +505,8 @@ function renderStatus(s) {
 
   if (online && models.fl2va === false) {
     el.offlineBanner.hidden = false;
+    el.offlineBanner.dataset.tone = 'danger';
+    el.offlineTitle.textContent = 'Checkpoint missing.';
     el.offlineDetail.textContent =
       'ComfyUI is up but the fl2va checkpoint is not loaded, so generation will fail. Check the model symlinks on the pod.';
   }
@@ -1001,7 +1033,15 @@ function readySlot(slot) { return state.assets[slot].some(a => a.status === 'don
 
 function blockedReason() {
   if (state.job || state.submitting) return 'A job is already running — cancel it or wait for it to finish.';
-  if (state.status && !state.status.online) return 'The pod is offline, so nothing can be queued.';
+  if (state.status && !state.status.online) {
+    const pod = state.status.pod;
+    if (pod && pod.state === 'provisioning') {
+      const ph = describePhase(pod.phase);
+      return `The GPU is still being set up (step ${ph.step} of ${ph.total}: ${ph.label}).`;
+    }
+    if (!pod) return 'No GPU is running — start one from the bar above.';
+    return 'The pod is unreachable, so nothing can be queued.';
+  }
   if (state.status && state.status.models && state.status.models.fl2va === false)
     return 'The fl2va checkpoint is not loaded on the pod.';
   if (!el.prompt.value.trim()) return 'Write a prompt first.';
