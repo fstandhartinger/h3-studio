@@ -297,6 +297,7 @@ const el = {
   durationOut: $('#duration-out'),
   durWarn: $('#dur-warn'),
   steps: $('#steps'),
+  stepsHelp: $('#steps-help'),
   stepsOut: $('#steps-out'),
   seed: $('#seed'),
   seedRandom: $('#seed-random'),
@@ -494,6 +495,7 @@ function renderStatus(s) {
 
   // model availability -> r2v tab
   const models = s.models || {};
+  applyCheckpointDefaults(models);
   const r2vTab = el.tabs.find(t => t.dataset.mode === 'r2v');
   const r2vOk = !!models.ref2va;
   r2vTab.setAttribute('aria-disabled', String(!r2vOk));
@@ -517,6 +519,39 @@ function renderStatus(s) {
       ? `Pod online. ${gpu.name || 'GPU'} ready.`
       : `Pod offline. ${s.error || 'Generation unavailable.'}`;
     lastOnline = online;
+  }
+}
+
+/**
+ * Step default per checkpoint.
+ *
+ * The 10Eros-Max TURBO checkpoint has the turbo delta baked in; its author recommends
+ * 6–8 steps, and 20 costs three times the GPU minutes for nothing. The slider kept
+ * defaulting to 20 because that was right for the stock checkpoint, and a user who does
+ * not read the model card has no way to know. So the default follows the loaded model:
+ * applied once per checkpoint, and never over a value the user set for THIS checkpoint.
+ */
+const STEPS_FOR_KEY = 'h3-steps-for';
+function applyCheckpointDefaults(models) {
+  const dit = models.dit || '';
+  if (!dit || state.ditSeen === dit) return;
+  state.ditSeen = dit;
+  const turbo = /turbo/i.test(dit);
+  el.stepsHelp.textContent = turbo
+    ? 'TURBO checkpoint loaded: its author recommends 6–8 steps (res_multistep/simple for motion). '
+      + '20 steps takes three times as long and does not look better.'
+    : '20 is the calibrated default for the stock checkpoint. It is CFG‑distilled, so there is no guidance '
+      + 'scale — steps are the only quality dial, and time scales almost linearly with them.';
+  let tunedFor = null;
+  try { tunedFor = localStorage.getItem(STEPS_FOR_KEY); } catch { /* private mode */ }
+  if (tunedFor === dit) return;                       // the user chose steps for this model
+  const want = turbo ? 6 : 20;
+  if (parseInt(el.steps.value, 10) !== want) {
+    el.steps.value = want;
+    el.stepsOut.textContent = String(want);
+    saveSettings();
+    if (typeof syncEstimate === 'function') syncEstimate();
+    toast(`Steps set to ${want} for ${turbo ? 'the TURBO checkpoint' : 'the stock checkpoint'}.`, 'info', 6000);
   }
 }
 
@@ -944,7 +979,11 @@ function syncDuration() {
 }
 
 el.steps.addEventListener('input', () => { el.stepsOut.textContent = el.steps.value; syncEstimate(); });
-el.steps.addEventListener('change', saveSettings);
+el.steps.addEventListener('change', () => {
+  saveSettings();
+  // Remember that this value is a choice for the current checkpoint, not a default.
+  try { if (state.ditSeen) localStorage.setItem(STEPS_FOR_KEY, state.ditSeen); } catch { /* private mode */ }
+});
 
 el.seedRandom.addEventListener('click', () => {
   el.seed.value = Math.floor(Math.random() * 4294967295);

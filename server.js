@@ -48,7 +48,7 @@ export function setComfyUrl(url) {
   ws = null;
   if (COMFY_URL) {
     connectWs();
-    refreshCheckpoints().catch(() => {});
+    refreshCheckpoints().then(rehydrateFromComfy).catch(() => {});
   }
 }
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
@@ -367,11 +367,109 @@ function publicJob(j) {
     durationSec: +(j.length / FPS).toFixed(2), steps: j.steps, seed: j.seed,
     loras: j.loras || [],
     createdAt: j.createdAt, elapsedSec: j.elapsedSec ?? null,
+    restored: !!j.restored,
     step: j.step ?? 0, totalSteps: j.steps,
     error: j.error || undefined,
     videoUrl: j.state === 'done' ? `/api/video/${j.id}` : undefined,
     posterUrl: j.state === 'done' && j.posterFile ? `/api/poster/${j.id}` : undefined,
   };
+}
+
+/**
+ * Rebuild the gallery from ComfyUI's history.
+ *
+ * Finished clips live in this container's cache, and a redeploy replaces the container,
+ * so every deploy used to empty the gallery — while the pod that rendered those clips was
+ * still running with every one of them on its disk. ComfyUI keeps a history of completed
+ * prompts, and our graphs are recognisable in it (SaveVideo with an h3studio/<jobId>
+ * prefix). So on startup and whenever the endpoint changes, anything the pod remembers
+ * that this process does not is pulled back into the gallery.
+ *
+ * Story stitches are not recoverable this way: the concatenated file only ever existed
+ * here. Their individual shots come back as ordinary clips.
+ */
+async function rehydrateFromComfy() {
+  if (!COMFY_URL) return 0;
+  let hist;
+  try { hist = await comfyJson(`/history?max_items=${MAX_HISTORY}`, {}, 30000); }
+  catch { return 0; }
+  const entries = Object.entries(hist || {});
+  let added = 0;
+  const base = Date.now() - entries.length * 1000;
+
+  for (let idx = 0; idx < entries.length; idx++) {
+    const [promptId, entry] = entries[idx];
+    if (promptToJob.has(promptId) || !entry?.status?.completed) continue;
+    const graph = entry.prompt?.[2] || {};
+
+    let saveNode = null, posterNode = null, cond = null, sched = null, noise = null, mode = 't2v';
+    const loras = [];
+    for (const [nid, n] of Object.entries(graph)) {
+      const ins = n?.inputs || {};
+      switch (n?.class_type) {
+        case 'SaveVideo':
+          if (/^h3studio\//.test(ins.filename_prefix || '')) saveNode = nid;
+          break;
+        case 'SaveImage':
+          if (/^h3poster\//.test(ins.filename_prefix || '')) posterNode = nid;
+          break;
+        case 'MiniMaxH3ImageToVideo':
+          cond = n;
+          mode = ins.first_frame && ins.last_frame ? 'flf2v' : ins.first_frame ? 'i2v' : ins.last_frame ? 'flf2v' : 't2v';
+          break;
+        case 'MiniMaxH3ReferenceToVideo':
+          cond = n; mode = 'r2v';
+          break;
+        case 'BasicScheduler': sched = n; break;
+        case 'RandomNoise': noise = n; break;
+        case 'LoraLoaderModelOnly':
+          loras.push({ name: ins.lora_name, strength: ins.strength_model });
+          break;
+        default: break;
+      }
+    }
+    if (!saveNode || !cond) continue;                       // keyframes, or not ours
+    const jobId = String(graph[saveNode].inputs.filename_prefix).split('/')[1] || promptId.slice(0, 8);
+    if (jobs.has(jobId)) continue;
+
+    const outs = entry.outputs || {};
+    const pick = (nodeId, keys) => {
+      const o = outs[nodeId] || {};
+      for (const k of keys) if (o[k]?.length) return o[k][0];
+      return null;
+    };
+    const vid = pick(saveNode, ['images', 'videos', 'gifs']);
+    if (!vid) continue;
+    const pos = posterNode ? pick(posterNode, ['images']) : null;
+
+    const job = {
+      id: jobId, state: 'done', mode,
+      prompt: String(cond.inputs.prompt || ''),
+      width: Number(cond.inputs.width) || 0,
+      height: Number(cond.inputs.height) || 0,
+      length: Number(cond.inputs.length) || 0,
+      steps: sched?.inputs?.steps ?? null,
+      seed: noise?.inputs?.noise_seed ?? null,
+      loras,
+      createdAt: base + idx * 1000,                          // keeps the pod's own order
+      elapsedSec: null,
+      promptId, saveNode, posterNode,
+      restored: true,
+    };
+    try {
+      job.cachedVideo = await cacheFile(vid, `${jobId}.mp4`);
+      if (pos) job.cachedPoster = await cacheFile(pos, `${jobId}.png`);
+      job.posterFile = !!job.cachedPoster;
+    } catch { continue; }
+    promptToJob.set(promptId, jobId);
+    pushJob(job);
+    added++;
+  }
+  if (added) {
+    console.log(`  gallery : restored ${added} clip(s) from the pod's history`);
+    await pruneCache();
+  }
+  return added;
 }
 
 // ------------------------------------------- ComfyUI websocket -> SSE
@@ -530,6 +628,7 @@ setInterval(async () => {
 }, 20000).unref();
 
 connectWs();
+if (COMFY_URL) refreshCheckpoints().then(rehydrateFromComfy).catch(() => {});
 
 // ---------------------------------------------------------------- app
 
