@@ -7,6 +7,12 @@
 <title>H3 Studio — MiniMax H3 video + native audio</title>
 <meta name="description" content="Drive a self-hosted MiniMax H3 video model with natively generated synchronized stereo audio.">
 <link rel="stylesheet" href="styles.css">
+<script defer src="https://bh-analytics.app.mintapis.com/script.js"
+        integrity="sha384-ZMxgpYfO/phGz4GiYTIZhcauuGKTb2onmOB5gsiigjmBR38DGAmIna5J1Y/dM/13"
+        crossorigin="anonymous"
+        data-website-id="9472a691-2a27-4d29-aa7a-c50ad1adccf0"
+        data-domains="h3-studio.app.mintapis.com,h3-studio.onrender.com"
+        data-do-not-track="true"></script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23120f1c'/><text x='50%25' y='56%25' font-size='34' font-family='monospace' font-weight='700' fill='%23a78bfa' text-anchor='middle' dominant-baseline='middle'>H3</text></svg>">
 </head>
 <body>
@@ -42,6 +48,7 @@
     <p class="login-note">Enter it once — this browser stays signed in.</p>
     <p class="login-error" id="login-error" role="alert" hidden></p>
     <button class="btn btn-primary btn-block" type="submit" id="login-submit">Unlock</button>
+    <p class="login-privacy"><a href="/privacy.html">Privacy</a></p>
   </form>
 </div>
 
@@ -652,6 +659,9 @@
     <span>Self‑hosted MiniMax H3 · ComfyUI · RTX PRO 6000 Blackwell</span>
     <span class="footer-sep" aria-hidden="true">·</span>
     <span>Picture and stereo audio decoded from one latent — no TTS in the pipeline.</span>
+    <span class="footer-sep" aria-hidden="true">·</span>
+    <span id="visitor-count" class="visitor-count" hidden></span>
+    <a href="/privacy.html">Privacy</a>
   </footer>
 </div>
 
@@ -664,5 +674,6 @@
 <script type="module" src="story.js"></script>
 <script type="module" src="pod.js"></script>
 <script type="module" src="storyboard.js"></script>
+<script type="module" src="analytics.js"></script>
 </body>
 </html>

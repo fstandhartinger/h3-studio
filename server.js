@@ -29,6 +29,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------- config
 
 const PORT = process.env.PORT || 3000;
+const UMAMI_BASE_URL = 'https://bh-analytics.app.mintapis.com';
+const UMAMI_API_KEY = process.env.UMAMI_API_KEY || '';
+const UMAMI_WEBSITE_ID = '9472a691-2a27-4d29-aa7a-c50ad1adccf0';
+const UMAMI_VISITOR_CACHE_MS = 10 * 60 * 1000;
+const UMAMI_VISITOR_RETRY_MS = 60 * 1000;
+let umamiVisitorCount = null;
+let umamiVisitorFetchedAt = 0;
+let umamiVisitorInFlight = null;
+let umamiVisitorRetryAfter = 0;
 /**
  * The ComfyUI endpoint. Not a constant: when a pod is started from the UI its proxy URL
  * becomes the endpoint, so the app follows the GPU it just rented without a redeploy.
@@ -1501,6 +1510,58 @@ app.post('/api/storyboard/render', requireAuth, async (req, res) => {
 });
 
 app.get('/healthz', (req, res) => res.json({ ok: true, comfyConfigured: !!COMFY_URL }));
+
+async function fetchUmamiVisitorCount(now) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const query = new URLSearchParams({ startAt: '0', endAt: String(now) });
+    const response = await fetch(
+      `${UMAMI_BASE_URL}/api/websites/${UMAMI_WEBSITE_ID}/stats?${query}`,
+      { headers: { Authorization: `Bearer ${UMAMI_API_KEY}` }, signal: controller.signal },
+    );
+    if (!response.ok) return null;
+    const stats = await response.json();
+    const visitors = stats?.visitors;
+    return Number.isSafeInteger(visitors) && visitors >= 0 ? visitors : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Public, read-only visitor count for the footer. The website ID and upstream URL are
+// fixed in server config; the Umami API key never leaves this process.
+app.get('/api/analytics/visitors', async (req, res) => {
+  if (!UMAMI_API_KEY) return res.set('Cache-Control', 'no-store').status(503).json({ visitors: null });
+
+  const now = Date.now();
+  if (umamiVisitorCount !== null && now - umamiVisitorFetchedAt < UMAMI_VISITOR_CACHE_MS) {
+    return res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
+      .json({ visitors: umamiVisitorCount });
+  }
+  if (now < umamiVisitorRetryAfter) {
+    return res.set('Cache-Control', 'no-store').status(503).json({ visitors: null });
+  }
+
+  if (!umamiVisitorInFlight) {
+    umamiVisitorInFlight = fetchUmamiVisitorCount(now).finally(() => {
+      umamiVisitorInFlight = null;
+    });
+  }
+
+  const visitors = await umamiVisitorInFlight;
+  if (visitors === null) {
+    umamiVisitorRetryAfter = Date.now() + UMAMI_VISITOR_RETRY_MS;
+    return res.set('Cache-Control', 'no-store').status(503).json({ visitors: null });
+  }
+  umamiVisitorCount = visitors;
+  umamiVisitorFetchedAt = Date.now();
+  umamiVisitorRetryAfter = 0;
+  return res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600')
+    .json({ visitors });
+});
 
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '5m' }));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
