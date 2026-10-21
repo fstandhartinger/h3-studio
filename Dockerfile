@@ -4,6 +4,9 @@
 # and concatenates the finished segments, and both are ffmpeg. The app degrades to
 # single-clip mode without it rather than crashing, but the headline feature is gone.
 FROM node:22-bookworm-slim
+# eMudhra CA distrust (Oct 2026): current CA bundle, and make Node trust it instead of its bundled root list
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+ENV NODE_OPTIONS="--use-openssl-ca"
 
 # curl is not optional either, though for an unobvious reason: Coolify runs its own
 # healthcheck INSIDE the container with curl or wget and ignores the HEALTHCHECK below,
